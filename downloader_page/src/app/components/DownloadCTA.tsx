@@ -15,6 +15,7 @@ interface PlatformDownload {
 
 export function DownloadCTA() {
   const [copied, setCopied] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [platforms, setPlatforms] = useState<PlatformDownload[]>([
     { name: "Windows", icon: Download, sub: "Windows 10 · 11", file: "AI-CLI-Orchestrator-Setup.exe", available: false },
     { name: "macOS", icon: Apple, sub: "Apple Silicon · Intel", file: "AI-CLI-Orchestrator-Setup.dmg", available: false },
@@ -26,7 +27,15 @@ export function DownloadCTA() {
 
   const fetchVersionInfo = async () => {
     try {
-      const res = await fetch(config.getApiUrl(config.endpoints.version));
+      setLoading(true);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
+      
+      const res = await fetch(config.getApiUrl(config.endpoints.version), {
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+      
       if (!res.ok) {
         throw new Error(`HTTP error! status: ${res.status}`);
       }
@@ -46,9 +55,11 @@ export function DownloadCTA() {
         return p;
       }));
       setApiError(false);
+      setLoading(false);
     } catch (err) {
       console.error('Failed to fetch version info:', err);
       setApiError(true);
+      setLoading(false);
       // Auto-retry up to 2 times with exponential backoff
       if (retryCount < 2) {
         const delay = Math.pow(2, retryCount) * 1000; // 1s, 2s
@@ -61,6 +72,7 @@ export function DownloadCTA() {
 
   useEffect(() => {
     fetchVersionInfo();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [retryCount]);
 
   const handleCopy = async () => {
@@ -166,26 +178,42 @@ export function DownloadCTA() {
 
             {/* Platform downloads */}
             <div className="mt-8 grid grid-cols-1 sm:grid-cols-3 gap-3">
-              {platforms.map((p, i) => (
-                <motion.a
-                  key={p.name}
-                  href={p.available ? config.getDownloadUrl(p.url!) : '#'}
-                  download={p.available ? p.file : undefined}
-                  initial={{ opacity: 0, y: 20 }}
-                  whileInView={{ opacity: 1, y: 0 }}
-                  viewport={{ once: true }}
-                  transition={{ duration: 0.5, delay: 0.1 + i * 0.08 }}
-                  className={`group relative flex items-center gap-3 px-4 py-3.5 rounded-xl border border-white/10 backdrop-blur-md transition-all text-left ${
-                    p.available
-                      ? 'bg-white/[0.03] hover:bg-white/[0.08] hover:border-white/20 cursor-pointer'
-                      : 'bg-white/[0.01] opacity-50 cursor-not-allowed'
-                  }`}
-                  onClick={(e) => {
-                    if (!p.available) {
-                      e.preventDefault();
-                    }
-                  }}
-                >
+              {loading && !apiError ? (
+                // Loading skeleton
+                [1, 2, 3].map((i) => (
+                  <div
+                    key={i}
+                    className="flex items-center gap-3 px-4 py-3.5 rounded-xl border border-white/10 bg-white/[0.02] backdrop-blur-md animate-pulse"
+                  >
+                    <div className="w-9 h-9 rounded-lg bg-white/5" />
+                    <div className="flex-1 space-y-2">
+                      <div className="h-4 bg-white/5 rounded w-3/4" />
+                      <div className="h-3 bg-white/5 rounded w-1/2" />
+                    </div>
+                  </div>
+                ))
+              ) : (
+                platforms.map((p, i) => (
+                  <motion.a
+                    key={p.name}
+                    href={p.available ? config.getDownloadUrl(p.url!) : '#'}
+                    download={p.available ? p.file : undefined}
+                    initial={{ opacity: 0, y: 20 }}
+                    whileInView={{ opacity: 1, y: 0 }}
+                    viewport={{ once: true }}
+                    transition={{ duration: 0.5, delay: 0.1 + i * 0.08 }}
+                    className={`group relative flex items-center gap-3 px-4 py-3.5 rounded-xl border border-white/10 backdrop-blur-md transition-all text-left ${
+                      p.available
+                        ? 'bg-white/[0.03] hover:bg-white/[0.08] hover:border-white/20 cursor-pointer'
+                        : 'bg-white/[0.01] opacity-50 cursor-not-allowed'
+                    }`}
+                    onClick={(e) => {
+                      if (!p.available) {
+                        e.preventDefault();
+                      }
+                    }}
+                    aria-label={p.available ? `Download for ${p.name}` : `${p.name} coming soon`}
+                  >
                   <div className={`w-9 h-9 rounded-lg bg-white/5 border border-white/10 flex items-center justify-center transition-colors ${
                     p.available ? 'group-hover:bg-white/10' : ''
                   }`}>
@@ -202,9 +230,21 @@ export function DownloadCTA() {
                   {p.available && (
                     <Download className="w-4 h-4 text-neutral-500 group-hover:text-white transition-colors" />
                   )}
-                </motion.a>
-              ))}
+                  </motion.a>
+                ))
+              )}
             </div>
+
+            {/* Error message */}
+            {apiError && !loading && (
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="mt-4 px-4 py-3 rounded-xl border border-red-500/20 bg-red-500/10 text-red-300 text-sm text-center"
+              >
+                Unable to fetch download information. {retryCount < 2 ? 'Retrying...' : 'Please refresh the page.'}
+              </motion.div>
+            )}
 
             {/* Footer note */}
             <div className="mt-8 flex flex-col sm:flex-row items-center justify-center gap-4 text-sm text-neutral-500">
