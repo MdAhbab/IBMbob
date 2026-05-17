@@ -11,7 +11,14 @@ from typing import Optional, Dict, Any, BinaryIO
 
 # Try to import IBM Watson libraries - they may not be installed with Python 3.13
 try:
-    from ibm_watson import SpeechToTextV1
+    from ibm_watson import NaturalLanguageUnderstandingV1, SpeechToTextV1
+    from ibm_watson.natural_language_understanding_v1 import (
+        ConceptsOptions,
+        EntitiesOptions,
+        Features,
+        KeywordsOptions,
+        SentimentOptions,
+    )
     from ibm_cloud_sdk_core.authenticators import IAMAuthenticator
     from ibm_watsonx_ai import APIClient, Credentials
     try:
@@ -312,9 +319,53 @@ class WatsonxService:
             raise ServiceError(f"Failed to list models: {str(e)}")
 
 
+class NaturalLanguageUnderstandingService:
+    """IBM Watson NLU — entity/sentiment/keyword analysis (not generative chat)."""
+
+    def __init__(self) -> None:
+        if not IBM_WATSON_AVAILABLE:
+            raise ServiceError("IBM Watson SDK not available for NLU.")
+        if not settings.nlu_api_key or not settings.nlu_url:
+            raise ServiceError(
+                "NLU not configured. Set NLU_API_KEY and NLU_URL in backend/.env."
+            )
+        try:
+            authenticator = IAMAuthenticator(settings.nlu_api_key)
+            self.service = NaturalLanguageUnderstandingV1(
+                version="2022-04-12",
+                authenticator=authenticator,
+            )
+            self.service.set_service_url(settings.nlu_url.rstrip("/"))
+            logger.info("Watson NLU service initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize NLU: {e}")
+            raise ServiceError(f"NLU initialization failed: {e}") from e
+
+    def analyze(self, text: str, language: str = "en") -> Dict[str, Any]:
+        """Run NLU analysis and return a plain dict."""
+        if not text or not text.strip():
+            return {}
+        try:
+            response = self.service.analyze(
+                text=text.strip()[:5000],
+                features=Features(
+                    sentiment=SentimentOptions(),
+                    entities=EntitiesOptions(limit=12),
+                    keywords=KeywordsOptions(limit=12),
+                    concepts=ConceptsOptions(limit=8),
+                ),
+                language=language,
+            ).get_result()
+            return response if isinstance(response, dict) else dict(response)
+        except Exception as e:
+            logger.error(f"NLU analyze failed: {e}")
+            raise ServiceError(f"NLU analyze failed: {e}") from e
+
+
 # Singleton instances (lazy initialization)
 _stt_service: Optional[SpeechToTextService] = None
 _watsonx_service: Optional[WatsonxService] = None
+_nlu_service: Optional[NaturalLanguageUnderstandingService] = None
 
 
 def get_stt_service() -> SpeechToTextService:
@@ -341,5 +392,13 @@ def get_watsonx_service() -> WatsonxService:
     if _watsonx_service is None:
         _watsonx_service = WatsonxService()
     return _watsonx_service
+
+
+def get_nlu_service() -> NaturalLanguageUnderstandingService:
+    """Get or create Watson NLU service instance."""
+    global _nlu_service
+    if _nlu_service is None:
+        _nlu_service = NaturalLanguageUnderstandingService()
+    return _nlu_service
 
 # Made with Bob

@@ -13,7 +13,8 @@ import { CommandPalette } from "./components/CommandPalette";
 import { GlobalChatBar } from "./components/GlobalChatBar";
 import { type CliRuntime } from "./components/TerminalCard";
 import { type CtxFile } from "./components/ContextDropzone";
-import { apiPath } from "./lib/api";
+import { apiFetch, apiPath, isAbortError } from "./lib/api";
+import { parseApiError } from "./lib/apiErrors";
 import {
   mapSharedFilesToCtx,
   type SharedContextResponse,
@@ -123,13 +124,14 @@ function Shell() {
     setMsgs((m) => [...m, userMsg]);
     setChatInput("");
     try {
-      const res = await fetch(apiPath("/orchestrator/chat"), {
+      const res = await apiFetch("/orchestrator/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           session_id: activeSessionId,
           message: v
-        })
+        }),
+        timeoutMs: 60_000,
       });
       if (res.ok) {
         const data = await res.json();
@@ -147,21 +149,25 @@ function Shell() {
         };
         setMsgs((m) => [...m, reply]);
       } else {
+        const detail = await parseApiError(res);
         const errReply: Msg = {
           id: `err-${Date.now()}`,
           role: "orchestrator",
           ts: new Date().toTimeString().slice(0, 5),
-          content: "Sorry, I encountered an error communicating with the orchestration service."
+          content: `Orchestrator error: ${detail}`,
         };
         setMsgs((m) => [...m, errReply]);
       }
     } catch (err) {
       console.error("Failed to send message:", err);
+      const timedOut = isAbortError(err);
       const errReply: Msg = {
         id: `err-${Date.now()}`,
         role: "orchestrator",
         ts: new Date().toTimeString().slice(0, 5),
-        content: "Network error: Failed to reach the backend services."
+        content: timedOut
+          ? "Backend timed out. Press Ctrl+C in the terminal running `python run.py`, then start it again."
+          : "Network error: Failed to reach the backend. Is `python run.py` running?",
       };
       setMsgs((m) => [...m, errReply]);
     }
@@ -198,7 +204,7 @@ function Shell() {
       try {
         const [provRes, activeRes, usageRes] = await Promise.all([
           fetch(apiPath("/providers?enabled_only=true")),
-          fetch(apiPath("/runtimes/active")),
+          apiFetch("/runtimes/live"),
           fetch(apiPath("/analytics/usage?days=1")).catch(() => null),
         ]);
         if (cancelled) return;

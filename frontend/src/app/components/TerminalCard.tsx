@@ -16,6 +16,7 @@ import "@xterm/xterm/css/xterm.css";
 
 import { Dropdown } from "./Sidebar";
 import { apiPath, wsPath } from "../lib/api";
+import { cliInstallForProvider } from "../lib/cliInstall";
 
 type AuthMethod = "api_key" | "oauth" | "ssh" | "bearer" | "account";
 
@@ -178,6 +179,11 @@ export function TerminalCard({
       } catch (e) {
         console.error("Failed to spawn runtime:", e);
         termRef.current?.writeln(`\x1b[31m[bob] failed to start terminal: ${e}\x1b[0m`);
+        const install = cliInstallForProvider(cli.id);
+        if (install) {
+          termRef.current?.writeln(`\x1b[33m[bob] install CLI:\x1b[0m ${install.install}`);
+          termRef.current?.writeln(`\x1b[33m[bob] verify:\x1b[0m ${install.verify}`);
+        }
         setWsStatus("error");
         return;
       }

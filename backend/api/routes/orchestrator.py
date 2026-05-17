@@ -455,6 +455,88 @@ def _strip_code_fences(text: str) -> str:
     return s.strip()
 
 
+def _plan_from_nlu_analysis(
+    message: str,
+    analysis: Dict[str, Any],
+    providers_summary: str,
+) -> Dict[str, Any]:
+    """Turn Watson NLU JSON into an orchestrator-style chat payload."""
+    sentiment = analysis.get("sentiment") or {}
+    doc_sent = sentiment.get("document") or {}
+    label = doc_sent.get("label") or "unknown"
+    score = doc_sent.get("score")
+    score_txt = f" ({score:.2f})" if isinstance(score, (int, float)) else ""
+
+    entities = analysis.get("entities") or []
+    keywords = analysis.get("keywords") or []
+    concepts = analysis.get("concepts") or []
+
+    ent_bits = [
+        f"{e.get('text', '')} ({e.get('type', 'entity')})"
+        for e in entities[:6]
+        if e.get("text")
+    ]
+    kw_bits = [k.get("text", "") for k in keywords[:6] if k.get("text")]
+    concept_bits = [c.get("text", "") for c in concepts[:5] if c.get("text")]
+
+    summary_parts = [
+        f"I analyzed your message with Watson NLU (sentiment: {label}{score_txt})."
+    ]
+    if ent_bits:
+        summary_parts.append(f"Entities: {', '.join(ent_bits)}.")
+    if kw_bits:
+        summary_parts.append(f"Keywords: {', '.join(kw_bits)}.")
+    if concept_bits:
+        summary_parts.append(f"Concepts: {', '.join(concept_bits)}.")
+    summary_parts.append(
+        "NLU understands language structure — for full task planning, enable Watsonx Granite "
+        "or describe the next concrete step you want agents to run."
+    )
+
+    thinking = [
+        "Watson NLU analyze() completed.",
+        f"Sentiment: {label}{score_txt}",
+        f"Enabled agents: {providers_summary}",
+    ]
+    if ent_bits:
+        thinking.append(f"Entities: {', '.join(ent_bits[:4])}")
+    if kw_bits:
+        thinking.append(f"Keywords: {', '.join(kw_bits[:4])}")
+
+    return {
+        "content": " ".join(summary_parts),
+        "thinking": thinking,
+        "divisions": [],
+        "artifacts": [{"name": "nlu-analysis.json", "kind": "json"}],
+        "model": "watson-nlu",
+        "nlu": {
+            "sentiment": doc_sent,
+            "entities": entities[:12],
+            "keywords": keywords[:12],
+            "concepts": concepts[:8],
+        },
+    }
+
+
+def _offline_chat_plan(message: str, providers_summary: str) -> Dict[str, Any]:
+    """Deterministic fallback when Watsonx is not configured (still useful for local dev)."""
+    preview = message.strip()[:240]
+    return {
+        "content": (
+            "I'm running in offline orchestrator mode (Watsonx not configured). "
+            "Add WATSONX_API_KEY and WATSONX_PROJECT_ID to backend/.env, then restart "
+            "`python run.py` for full Granite responses."
+        ),
+        "thinking": [
+            "Parsed the user request locally.",
+            f"Enabled agents: {providers_summary}",
+            "Watsonx call skipped — credentials or SDK missing.",
+        ],
+        "divisions": [],
+        "artifacts": [{"name": "task-notes.md", "kind": "md"}],
+    }
+
+
 def _parse_watsonx_plan(raw: str, fallback_message: str) -> Dict[str, Any]:
     """Coerce the Watsonx response into our chat metadata schema."""
     cleaned = _strip_code_fences(raw)
@@ -498,30 +580,29 @@ async def chat_inference(
     # Lazy import so a missing SDK only affects this endpoint, not the whole app.
     try:
         from backend.services.ibm_watson_service import (
-            IBM_WATSON_AVAILABLE, WatsonxService
+            IBM_WATSON_AVAILABLE,
+            WatsonxService,
+            get_nlu_service,
         )
     except Exception as e:  # pragma: no cover
         IBM_WATSON_AVAILABLE = False
         WatsonxService = None  # type: ignore
+        get_nlu_service = None  # type: ignore
         logger.warning(f"Watson service unavailable: {e}")
 
     from backend.config import settings as _settings
-    if not IBM_WATSON_AVAILABLE:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=(
-                "IBM Watsonx SDK is not installed. Install ibm-watsonx-ai in the "
-                "backend virtualenv to enable chat."
-            ),
-        )
-    if not _settings.watsonx_api_key or not _settings.watsonx_project_id:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=(
-                "Watsonx credentials missing. Set WATSONX_API_KEY and "
-                "WATSONX_PROJECT_ID in backend/.env."
-            ),
-        )
+    watsonx_ready = (
+        IBM_WATSON_AVAILABLE
+        and bool(_settings.watsonx_api_key)
+        and bool(_settings.watsonx_project_id)
+    )
+    nlu_ready = (
+        IBM_WATSON_AVAILABLE
+        and bool(_settings.nlu_api_key)
+        and bool(_settings.nlu_url)
+        and get_nlu_service is not None
+    )
+    ai_mode = (_settings.orchestrator_ai or "auto").strip().lower()
 
     # Ensure active session exists
     if session_id is None:
@@ -558,46 +639,94 @@ async def chat_inference(
 
     providers_summary = await _enabled_providers_summary(db, user_id)
 
-    full_prompt = (
-        ORCHESTRATOR_SYSTEM_PROMPT
-        + f"\n\nEnabled agents: {providers_summary}\n\n"
-        + f"User: {request.message}\n\n"
-        + "Respond now with the JSON object only:\n"
-    )
-
     model_id = request.model_name or "ibm/granite-13b-chat-v2"
     fallback_text = "I'm here. What would you like to build?"
+    full_prompt = ""
+    plan: Dict[str, Any]
 
-    try:
-        watsonx = WatsonxService()
-        raw = await asyncio.to_thread(
-            watsonx.generate_text,
-            prompt=full_prompt,
-            model_id=model_id,
-            parameters={"max_new_tokens": 600, "decoding_method": "greedy"},
-        )
-    except Exception as e:
-        logger.exception("watsonx call failed")
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Watsonx.ai call failed: {e}",
-        )
+    async def _run_nlu() -> Dict[str, Any]:
+        nlu = get_nlu_service()
+        analysis = await asyncio.to_thread(nlu.analyze, request.message)
+        return _plan_from_nlu_analysis(request.message, analysis, providers_summary)
 
-    plan = _parse_watsonx_plan(str(raw), fallback_text)
+    use_watsonx = ai_mode in ("auto", "watsonx") and watsonx_ready
+    use_nlu = ai_mode in ("auto", "nlu") and nlu_ready
+
+    if use_watsonx and ai_mode != "nlu":
+        full_prompt = (
+            ORCHESTRATOR_SYSTEM_PROMPT
+            + f"\n\nEnabled agents: {providers_summary}\n\n"
+            + f"User: {request.message}\n\n"
+            + "Respond now with the JSON object only:\n"
+        )
+        try:
+            watsonx = WatsonxService()
+            raw = await asyncio.to_thread(
+                watsonx.generate_text,
+                prompt=full_prompt,
+                model_id=model_id,
+                parameters={"max_new_tokens": 600, "decoding_method": "greedy"},
+            )
+            plan = _parse_watsonx_plan(str(raw), fallback_text)
+            plan["model"] = model_id
+        except Exception as e:
+            logger.exception("watsonx call failed")
+            err = str(e)
+            if use_nlu:
+                logger.info("Falling back to Watson NLU after Watsonx failure")
+                try:
+                    plan = await _run_nlu()
+                except Exception as nlu_err:
+                    logger.exception("NLU fallback failed")
+                    plan = _offline_chat_plan(request.message, providers_summary)
+                    plan["content"] = (
+                        f"Watsonx failed ({err[:120]}). NLU also failed ({nlu_err}). "
+                        "Check backend/.env credentials."
+                    )
+            else:
+                plan = _offline_chat_plan(request.message, providers_summary)
+                if "403" in err or "Forbidden" in err or "not a member of the project" in err:
+                    plan["content"] = (
+                        "Watsonx rejected the project ID (403). Set NLU_API_KEY/NLU_URL "
+                        "or fix WATSONX_PROJECT_ID, then restart python run.py."
+                    )
+                else:
+                    plan["content"] = (
+                        f"Watsonx call failed ({err[:200]}). Showing a local fallback."
+                    )
+    elif use_nlu:
+        try:
+            plan = await _run_nlu()
+        except Exception as e:
+            logger.exception("NLU chat failed")
+            plan = _offline_chat_plan(request.message, providers_summary)
+            plan["content"] = f"Watson NLU failed: {e}"
+    else:
+        if not IBM_WATSON_AVAILABLE:
+            logger.warning("IBM Watson SDK unavailable — offline chat fallback")
+        plan = _offline_chat_plan(request.message, providers_summary)
+        if nlu_ready and ai_mode == "watsonx":
+            plan["content"] += " (NLU is configured; set ORCHESTRATOR_AI=auto or nlu to use it.)"
 
     cursor = await db.execute("SELECT id FROM providers WHERE name = 'bob' LIMIT 1")
     bob_row = await cursor.fetchone()
     bob_provider_id = int(bob_row["id"]) if bob_row else None
 
-    tokens_used = max(1, (len(full_prompt) + len(plan["content"])) // 4)
+    response_model = plan.get("model", model_id)
+    tokens_used = max(
+        1,
+        (len(full_prompt or request.message) + len(plan.get("content", ""))) // 4,
+    )
 
     now = utc_now().isoformat()
     metadata = {
-        "thinking": plan["thinking"],
-        "divisions": plan["divisions"],
-        "artifacts": plan["artifacts"],
-        "model": model_id,
+        "thinking": plan.get("thinking", []),
+        "divisions": plan.get("divisions", []),
+        "artifacts": plan.get("artifacts", []),
+        "model": response_model,
     }
+    if plan.get("nlu"):
+        metadata["nlu"] = plan["nlu"]
     cursor = await db.execute(
         """
         INSERT INTO messages (
@@ -612,7 +741,7 @@ async def chat_inference(
             "text",
             json.dumps(metadata),
             "Orchestrator",
-            model_id,
+            response_model,
             bob_provider_id,
             tokens_used,
             now,

@@ -36,6 +36,7 @@ import { useStore, type AuthMethod, type Provider } from "./store";
 import { useTheme } from "./theme";
 import { OrchestratorLogo } from "./OrchestratorLogo";
 import { apiPath } from "../lib/api";
+import { CliInstallHint } from "./CliInstallHint";
 
 const RECENT_FOLDERS = [
   "~/projects/acme-monorepo",
@@ -1074,6 +1075,8 @@ function ConfigureRow({
           </SelectContent>
         </Select>
       </Field>
+
+      <CliInstallHint providerId={provider.id} />
     </div>
   );
 }

@@ -113,17 +113,28 @@ app.add_middleware(
 
 
 # Exception handlers
+def _error_json(
+    error: str,
+    detail: str,
+    code: str,
+    status_code: int,
+) -> JSONResponse:
+    """Build a JSON error response without risking datetime serialization bugs."""
+    import json as _json
+
+    payload = ErrorResponse(error=error, detail=detail, code=code).model_dump(mode="json")
+    return JSONResponse(status_code=status_code, content=_json.loads(_json.dumps(payload)))
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     """Handle request validation errors."""
     logger.warning(f"Validation error: {exc.errors()}")
-    return JSONResponse(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        content=ErrorResponse(
-            error="Validation Error",
-            detail=str(exc.errors()),
-            code="VALIDATION_ERROR"
-        ).model_dump()
+    return _error_json(
+        "Validation Error",
+        str(exc.errors()),
+        "VALIDATION_ERROR",
+        status.HTTP_422_UNPROCESSABLE_ENTITY,
     )
 
 
@@ -131,13 +142,11 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 async def general_exception_handler(request: Request, exc: Exception):
     """Handle general exceptions."""
     logger.error(f"Unhandled exception: {exc}", exc_info=True)
-    return JSONResponse(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content=ErrorResponse(
-            error="Internal Server Error",
-            detail=str(exc) if settings.debug else "An unexpected error occurred",
-            code="INTERNAL_ERROR"
-        ).model_dump()
+    return _error_json(
+        "Internal Server Error",
+        str(exc) if settings.debug else "An unexpected error occurred",
+        "INTERNAL_ERROR",
+        status.HTTP_500_INTERNAL_SERVER_ERROR,
     )
 
 

@@ -27,10 +27,30 @@ export function wsPath(path: string): string {
   return `${proto}//${window.location.host}${p}`;
 }
 
-/** Health check URL — prefers /api/health (same proxy as other API calls). */
+/** Health check URL — `/health` is proxied by Vite and always registered on FastAPI. */
 export function healthCheckUrl(): string {
-  return apiPath("/health");
+  return "/health";
 }
 
 /** @deprecated use healthCheckUrl() */
 export const healthPath = healthCheckUrl();
+
+const DEFAULT_FETCH_MS = 25_000;
+
+/** fetch() with an AbortSignal timeout so hung backends surface errors in the UI. */
+export function apiFetch(
+  path: string,
+  init?: RequestInit & { timeoutMs?: number },
+): Promise<Response> {
+  const { timeoutMs = DEFAULT_FETCH_MS, ...rest } = init ?? {};
+  const signal =
+    rest.signal ??
+    (typeof AbortSignal !== "undefined" && "timeout" in AbortSignal
+      ? AbortSignal.timeout(timeoutMs)
+      : undefined);
+  return fetch(apiPath(path), { ...rest, signal });
+}
+
+export function isAbortError(err: unknown): boolean {
+  return err instanceof DOMException && err.name === "AbortError";
+}

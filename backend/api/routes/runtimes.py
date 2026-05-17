@@ -147,6 +147,161 @@ async def get_all_runtimes(
     )
 
 
+async def _resolve_pty_cwd(
+    db: aiosqlite.Connection,
+    user_id: int,
+    requested: Optional[str],
+) -> str:
+    """Prefer explicit workspace_path, then active workspace from DB, then project root."""
+    from pathlib import Path
+
+    if requested:
+        try:
+            p = Path(normalize_workspace_path(requested))
+            if p.is_dir():
+                return str(p)
+        except Exception:
+            pass
+    raw = await fetch_active_workspace_path(db, user_id)
+    if raw:
+        try:
+            p = Path(normalize_workspace_path(raw))
+            if p.is_dir():
+                return str(p)
+        except Exception:
+            pass
+    return str(Path(app_settings.upload_dir).resolve().parent)
+
+
+def _active_runtime_snapshots() -> ActiveRuntimesResponse:
+    """Return only live PTY sessions in memory (cheap snapshot for the UI)."""
+    items: List[ActiveRuntime] = []
+    for s in pty_manager.list_active():
+        items.append(
+            ActiveRuntime(
+                runtime_id=s.runtime_id,
+                provider_id=s.provider_id,
+                provider_name=s.provider_name,
+                cwd=s.cwd,
+                pid=s.pid,
+                status=s.status,
+            )
+        )
+    return ActiveRuntimesResponse(runtimes=items, total=len(items))
+
+
+@router.get("/active", response_model=ActiveRuntimesResponse)
+async def list_active_runtimes(
+    user_id: int = Depends(get_current_user_id),
+) -> ActiveRuntimesResponse:
+    return _active_runtime_snapshots()
+
+
+@router.get("/live", response_model=ActiveRuntimesResponse)
+async def list_live_runtimes(
+    user_id: int = Depends(get_current_user_id),
+) -> ActiveRuntimesResponse:
+    """Alias for /active — avoids Starlette matching `active` as a path param."""
+    return _active_runtime_snapshots()
+
+
+@router.post("/spawn", response_model=SpawnResponse, status_code=status.HTTP_201_CREATED)
+async def spawn_runtime(
+    spawn: SpawnRequest,
+    db: aiosqlite.Connection = Depends(get_db),
+    user_id: int = Depends(get_current_user_id),
+) -> SpawnResponse:
+    """
+    Spawn a real Windows PTY (PowerShell) tied to a provider/agent card.
+    Returns a runtime_id + ws_url the frontend should attach to.
+    """
+    if not PTY_AVAILABLE:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Native PTY unavailable on this platform (Windows + pywinpty required).",
+        )
+
+    if spawn.provider_id is not None:
+        existing = pty_manager.active_for_provider(spawn.provider_id)
+        if existing is not None:
+            return SpawnResponse(
+                runtime_id=existing.runtime_id,
+                provider_id=existing.provider_id,
+                provider_name=existing.provider_name,
+                ws_url=f"/ws/terminals/{existing.runtime_id}",
+                cwd=existing.cwd,
+                pid=existing.pid,
+                status=existing.status,
+            )
+
+    cwd = await _resolve_pty_cwd(db, user_id, spawn.workspace_path)
+    provider_name = spawn.provider_name or ""
+
+    if spawn.provider_id is not None and not provider_name:
+        cur = await db.execute(
+            "SELECT display_name FROM providers WHERE id = ?",
+            (spawn.provider_id,),
+        )
+        row = await cur.fetchone()
+        if row:
+            provider_name = row["display_name"]
+
+    now = utc_now()
+    cursor = await db.execute(
+        """
+        INSERT INTO cli_runtimes (
+            session_id, provider_id, process_id, command,
+            working_directory, status, started_at
+        ) VALUES (?, ?, NULL, ?, ?, 'running', ?)
+        """,
+        (
+            spawn.session_id,
+            spawn.provider_id,
+            "powershell",
+            cwd,
+            now.isoformat(),
+        ),
+    )
+    await db.commit()
+    runtime_id = cursor.lastrowid
+    if runtime_id is None:
+        raise HTTPException(500, "Failed to allocate runtime id")
+
+    try:
+        session = pty_manager.create(
+            runtime_id=int(runtime_id),
+            provider_id=spawn.provider_id,
+            provider_name=provider_name or "Terminal",
+            cwd=cwd,
+        )
+        if spawn.cols and spawn.rows:
+            session.resize(spawn.cols, spawn.rows)
+    except Exception as e:
+        await db.execute(
+            "UPDATE cli_runtimes SET status='failed', completed_at=? WHERE id=?",
+            (utc_now().isoformat(), runtime_id),
+        )
+        await db.commit()
+        raise HTTPException(500, f"Failed to spawn PTY: {e}") from e
+
+    if session.pid is not None:
+        await db.execute(
+            "UPDATE cli_runtimes SET process_id = ? WHERE id = ?",
+            (session.pid, runtime_id),
+        )
+        await db.commit()
+
+    return SpawnResponse(
+        runtime_id=int(runtime_id),
+        provider_id=session.provider_id,
+        provider_name=session.provider_name,
+        ws_url=f"/ws/terminals/{runtime_id}",
+        cwd=session.cwd,
+        pid=session.pid,
+        status=session.status,
+    )
+
+
 @router.get("/{runtime_id}", response_model=RuntimeDetailResponse)
 async def get_runtime(
     runtime_id: int = Depends(verify_runtime_exists),
@@ -474,157 +629,6 @@ async def update_runtime(
     await db.commit()
     
     return await get_runtime(runtime_id, False, db, user_id)
-
-
-# ============================================================================
-# PTY spawn / active / delete endpoints
-# ============================================================================
-
-async def _resolve_pty_cwd(
-    db: aiosqlite.Connection,
-    user_id: int,
-    requested: Optional[str],
-) -> str:
-    """Prefer explicit workspace_path, then active workspace from DB, then project root."""
-    from pathlib import Path
-
-    if requested:
-        try:
-            p = Path(normalize_workspace_path(requested))
-            if p.is_dir():
-                return str(p)
-        except Exception:
-            pass
-    raw = await fetch_active_workspace_path(db, user_id)
-    if raw:
-        try:
-            p = Path(normalize_workspace_path(raw))
-            if p.is_dir():
-                return str(p)
-        except Exception:
-            pass
-    return str(Path(app_settings.upload_dir).resolve().parent)
-
-
-@router.post("/spawn", response_model=SpawnResponse, status_code=status.HTTP_201_CREATED)
-async def spawn_runtime(
-    spawn: SpawnRequest,
-    db: aiosqlite.Connection = Depends(get_db),
-    user_id: int = Depends(get_current_user_id),
-) -> SpawnResponse:
-    """
-    Spawn a real Windows PTY (PowerShell) tied to a provider/agent card.
-    Returns a runtime_id + ws_url the frontend should attach to.
-    """
-    if not PTY_AVAILABLE:
-        raise HTTPException(
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            detail="Native PTY unavailable on this platform (Windows + pywinpty required).",
-        )
-
-    # If we already have a live PTY for this provider, return it (idempotent).
-    if spawn.provider_id is not None:
-        existing = pty_manager.active_for_provider(spawn.provider_id)
-        if existing is not None:
-            return SpawnResponse(
-                runtime_id=existing.runtime_id,
-                provider_id=existing.provider_id,
-                provider_name=existing.provider_name,
-                ws_url=f"/ws/terminals/{existing.runtime_id}",
-                cwd=existing.cwd,
-                pid=existing.pid,
-                status=existing.status,
-            )
-
-    cwd = await _resolve_pty_cwd(db, user_id, spawn.workspace_path)
-    provider_name = spawn.provider_name or ""
-
-    # Look up the provider display_name if we only have an id.
-    if spawn.provider_id is not None and not provider_name:
-        cur = await db.execute(
-            "SELECT display_name FROM providers WHERE id = ?",
-            (spawn.provider_id,),
-        )
-        row = await cur.fetchone()
-        if row:
-            provider_name = row["display_name"]
-
-    now = utc_now()
-    cursor = await db.execute(
-        """
-        INSERT INTO cli_runtimes (
-            session_id, provider_id, process_id, command,
-            working_directory, status, started_at
-        ) VALUES (?, ?, NULL, ?, ?, 'running', ?)
-        """,
-        (
-            spawn.session_id,
-            spawn.provider_id,
-            "powershell",
-            cwd,
-            now.isoformat(),
-        ),
-    )
-    await db.commit()
-    runtime_id = cursor.lastrowid
-    if runtime_id is None:
-        raise HTTPException(500, "Failed to allocate runtime id")
-
-    try:
-        session = pty_manager.create(
-            runtime_id=int(runtime_id),
-            provider_id=spawn.provider_id,
-            provider_name=provider_name or "Terminal",
-            cwd=cwd,
-        )
-        if spawn.cols and spawn.rows:
-            session.resize(spawn.cols, spawn.rows)
-    except Exception as e:
-        # Mark the row as failed so it doesn't haunt the UI
-        await db.execute(
-            "UPDATE cli_runtimes SET status='failed', completed_at=? WHERE id=?",
-            (utc_now().isoformat(), runtime_id),
-        )
-        await db.commit()
-        raise HTTPException(500, f"Failed to spawn PTY: {e}") from e
-
-    # Persist pid once spawn succeeded.
-    if session.pid is not None:
-        await db.execute(
-            "UPDATE cli_runtimes SET process_id = ? WHERE id = ?",
-            (session.pid, runtime_id),
-        )
-        await db.commit()
-
-    return SpawnResponse(
-        runtime_id=int(runtime_id),
-        provider_id=session.provider_id,
-        provider_name=session.provider_name,
-        ws_url=f"/ws/terminals/{runtime_id}",
-        cwd=session.cwd,
-        pid=session.pid,
-        status=session.status,
-    )
-
-
-@router.get("/active", response_model=ActiveRuntimesResponse)
-async def list_active_runtimes(
-    user_id: int = Depends(get_current_user_id),
-) -> ActiveRuntimesResponse:
-    """Return only live PTY sessions in memory (cheap snapshot for the UI)."""
-    items: List[ActiveRuntime] = []
-    for s in pty_manager.list_active():
-        items.append(
-            ActiveRuntime(
-                runtime_id=s.runtime_id,
-                provider_id=s.provider_id,
-                provider_name=s.provider_name,
-                cwd=s.cwd,
-                pid=s.pid,
-                status=s.status,
-            )
-        )
-    return ActiveRuntimesResponse(runtimes=items, total=len(items))
 
 
 @router.delete("/{runtime_id}", status_code=status.HTTP_204_NO_CONTENT)

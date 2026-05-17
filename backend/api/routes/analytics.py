@@ -488,7 +488,13 @@ async def list_recent_analytics_events(
                 "tokens_used": row["tokens_used"],
                 "cost_estimate": row["cost_estimate"],
                 "metadata": json.loads(row["metadata"]) if row["metadata"] else None,
-                "created_at": row["created_at"],
+                "created_at": (
+                    row["created_at"]
+                    if isinstance(row["created_at"], str)
+                    else row["created_at"].isoformat()
+                    if hasattr(row["created_at"], "isoformat")
+                    else str(row["created_at"])
+                ),
             }
         )
     return out

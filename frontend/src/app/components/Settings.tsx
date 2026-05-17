@@ -28,6 +28,7 @@ import { Dropdown } from "./Sidebar";
 import { TerminalCard, type CliRuntime } from "./TerminalCard";
 import { ContextDropzone, INITIAL_CTX, type CtxFile } from "./ContextDropzone";
 import { apiPath } from "../lib/api";
+import { CliInstallHint } from "./CliInstallHint";
 
 type Tab =
   | "general"
@@ -482,6 +483,7 @@ function ProviderRow({ p, onChange }: { p: Provider; onChange: (p: Provider) => 
               </div>
             </div>
           )}
+          <CliInstallHint providerId={p.id} />
           <div>
             <label className="mb-1 block font-mono text-[10px] uppercase tracking-[0.2em] text-zinc-500">
               Daily cap (USD)

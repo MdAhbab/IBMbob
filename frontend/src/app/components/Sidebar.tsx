@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import { OrchestratorLogo } from "./OrchestratorLogo";
 import { useStore, type Status, type SessionEntry } from "./store";
-import { apiPath, healthCheckUrl } from "../lib/api";
+import { apiFetch, apiPath, healthCheckUrl } from "../lib/api";
 
 const STATUS_MAP: Record<Status, { dot: string; label: string; text: string }> = {
   online: { dot: "bg-emerald-500", label: "online", text: "text-emerald-600 dark:text-emerald-400" },
@@ -146,11 +146,17 @@ export function Sidebar({
     let cancelled = false;
     const load = async () => {
       try {
-        const r = await fetch(apiPath("/workspace/git"));
+        if (!backendHealthy) {
+          if (!cancelled) setGit(null);
+          return;
+        }
+        const r = await apiFetch("/workspace/git", { timeoutMs: 12_000 });
         if (!r.ok) return;
         const j = await r.json();
         if (!cancelled) setGit(j);
-      } catch {}
+      } catch {
+        if (!cancelled) setGit(null);
+      }
     };
     void load();
     const id = window.setInterval(load, 20000);
@@ -158,7 +164,7 @@ export function Sidebar({
       cancelled = true;
       window.clearInterval(id);
     };
-  }, []);
+  }, [backendHealthy]);
 
   const runGit = async () => {
     if (!gitCmd.trim()) return;
@@ -194,7 +200,10 @@ export function Sidebar({
     const checkBackendHealth = async () => {
       const startedAt = performance.now();
       try {
-        const response = await fetch(healthCheckUrl(), { cache: "no-store" });
+        const response = await fetch(healthCheckUrl(), {
+          cache: "no-store",
+          signal: AbortSignal.timeout(8_000),
+        });
         if (!response.ok) {
           throw new Error(`Health check failed with status ${response.status}`);
         }
@@ -338,7 +347,13 @@ export function Sidebar({
                     : "border-amber-300/40 bg-amber-50 text-amber-700 dark:border-amber-400/20 dark:bg-amber-400/10 dark:text-amber-300"
                 }`}
               >
-                {!git?.is_repo ? "no repo" : (git?.files_changed ?? 0) === 0 ? "clean" : `${git.files_changed} dirty`}
+                {!backendHealthy
+                  ? "offline"
+                  : !git?.is_repo
+                  ? "no repo"
+                  : (git?.files_changed ?? 0) === 0
+                  ? "clean"
+                  : `${git.files_changed} dirty`}
               </span>
             </div>
             <ChevronDown
@@ -358,7 +373,9 @@ export function Sidebar({
                   <GitField
                     label="Status"
                     value={
-                      !git?.is_repo
+                      !backendHealthy
+                        ? "waiting for backend…"
+                        : !git?.is_repo
                         ? "not a git repo"
                         : (git?.files_changed ?? 0) === 0
                         ? "working tree clean"

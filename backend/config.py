@@ -117,6 +117,10 @@ class Settings(BaseSettings):
     stt_url: Optional[str] = None
     watsonx_api_key: Optional[str] = None
     watsonx_project_id: Optional[str] = None
+    nlu_api_key: Optional[str] = None
+    nlu_url: Optional[str] = None
+    # Orchestrator chat: auto | watsonx | nlu
+    orchestrator_ai: str = "auto"
     
     # Orchestrator
     default_routing_strategy: str = "auto"
