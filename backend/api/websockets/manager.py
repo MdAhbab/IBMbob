@@ -152,7 +152,7 @@ class ConnectionManager:
         successful_sends = 0
         disconnected_connections = []
 
-        for connection_id, websocket in self.active_connections.items():
+        for connection_id, websocket in list(self.active_connections.items()):
             try:
                 await websocket.send_json(message)
                 successful_sends += 1
@@ -326,4 +326,6 @@ class ConnectionManager:
         """Get a list of all topics with active subscriptions."""
         return [topic for topic, connections in self.topic_connections.items() if connections]
 
-# Made with Bob
+# Global instance for app-wide use
+connection_manager = ConnectionManager()
+

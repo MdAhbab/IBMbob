@@ -113,6 +113,7 @@ class GitStatus(BaseModel):
 class GitCommandRequest(BaseModel):
     """Body for /api/workspace/git/run."""
     command: str
+    confirm: Optional[bool] = False
 
 
 class GitCommandResponse(BaseModel):
@@ -133,7 +134,7 @@ def _list_shared_dir(shared_dir: Path) -> List[SharedContextFileResponse]:
     entries: List[SharedContextFileResponse] = []
 
     for path in sorted(shared_resolved.rglob("*")):
-        if not path.is_file():
+        if path.is_symlink() or not path.is_file():
             continue
         rel = path.relative_to(shared_resolved)
         rel_posix = rel.as_posix()
@@ -171,6 +172,23 @@ async def _active_workspace_path(
         return raw
 
 
+@router.get("/validate-path")
+async def validate_path_endpoint(path: str) -> dict:
+    from pathlib import Path
+    try:
+        # Expand user (~) and resolve absolute path
+        p = Path(path).expanduser().resolve()
+        # It's valid if it exists as a directory, or if it doesn't exist but its parent exists and is a directory
+        is_valid = False
+        if p.exists():
+            is_valid = p.is_dir()
+        else:
+            is_valid = p.parent.exists() and p.parent.is_dir()
+        return {"valid": is_valid, "path": str(p)}
+    except Exception as e:
+        return {"valid": False, "error": str(e)}
+
+
 @router.get("/git", response_model=GitStatus)
 async def workspace_git_status(
     db: aiosqlite.Connection = Depends(get_db),
@@ -199,15 +217,22 @@ async def workspace_git_status(
     if code != 0:
         return GitStatus(workspace_path=ws, is_repo=False)
 
-    _, branch, _ = await _asyncio.to_thread(run, ["git", "rev-parse", "--abbrev-ref", "HEAD"])
-    _, sh, _ = await _asyncio.to_thread(run, ["git", "rev-parse", "--short", "HEAD"])
-    _, subj, _ = await _asyncio.to_thread(run, ["git", "log", "-1", "--format=%s"])
-    _, porc, _ = await _asyncio.to_thread(run, ["git", "status", "--porcelain"])
-    ahead = behind = 0
-    code, ab, _ = await _asyncio.to_thread(
-        run, ["git", "rev-list", "--left-right", "--count", "HEAD...@{upstream}"]
+    results = await _asyncio.gather(
+        _asyncio.to_thread(run, ["git", "rev-parse", "--abbrev-ref", "HEAD"]),
+        _asyncio.to_thread(run, ["git", "rev-parse", "--short", "HEAD"]),
+        _asyncio.to_thread(run, ["git", "log", "-1", "--format=%s"]),
+        _asyncio.to_thread(run, ["git", "status", "--porcelain"]),
+        _asyncio.to_thread(run, ["git", "rev-list", "--left-right", "--count", "HEAD...@{upstream}"]),
     )
-    if code == 0 and ab.strip():
+
+    _, branch, _ = results[0]
+    _, sh, _ = results[1]
+    _, subj, _ = results[2]
+    _, porc, _ = results[3]
+    code_ab, ab, _ = results[4]
+
+    ahead = behind = 0
+    if code_ab == 0 and ab.strip():
         parts = ab.split()
         if len(parts) == 2:
             try:
@@ -227,16 +252,19 @@ async def workspace_git_status(
     )
 
 
-_GIT_SAFE = {
+_GIT_READ = {
     "status", "log", "branch", "remote", "diff", "show", "rev-parse",
-    "config", "fetch", "pull", "switch", "checkout", "add", "commit",
-    "push", "stash",
+    "config", "fetch",
+}
+_GIT_WRITE = {
+    "pull", "switch", "add", "stash", "push", "commit", "checkout",
 }
 
 
 @router.post("/git/run", response_model=GitCommandResponse)
 async def workspace_git_run(
     payload: GitCommandRequest,
+    confirm: bool = False,
     db: aiosqlite.Connection = Depends(get_db),
     user_id: int = Depends(get_current_user_id),
 ) -> GitCommandResponse:
@@ -256,10 +284,27 @@ async def workspace_git_run(
         raise HTTPException(400, f"invalid shell tokens: {e}")
     if not parts:
         raise HTTPException(400, "empty command")
-    if parts[0] not in _GIT_SAFE:
+
+    subcmd = parts[0]
+    if subcmd not in _GIT_READ and subcmd not in _GIT_WRITE:
         raise HTTPException(
             400,
-            f"git subcommand '{parts[0]}' is not in the safe list ({sorted(_GIT_SAFE)})",
+            f"git subcommand '{subcmd}' is not in the allowed list",
+        )
+
+    # SEC-09/SC-01 check: push, commit, checkout are only allowed in debug mode
+    if subcmd in {"push", "commit", "checkout"} and not settings.debug:
+        raise HTTPException(
+            403,
+            f"git '{subcmd}' is disabled in production mode; enable DEBUG for local dev only",
+        )
+
+    # Require confirmation for write operations
+    confirm_action = confirm or getattr(payload, "confirm", False)
+    if subcmd in _GIT_WRITE and not confirm_action:
+        raise HTTPException(
+            400,
+            f"Confirmation required to run git write command '{subcmd}'",
         )
 
     ws = await _active_workspace_path(db, user_id)
@@ -284,6 +329,35 @@ async def workspace_git_run(
         stderr=proc.stderr,
         exit_code=proc.returncode,
         cwd=ws,
+    )
+
+
+@router.post("/shared", response_model=SharedContextFileResponse, status_code=status.HTTP_201_CREATED)
+async def upload_shared_context_file(
+    file: UploadFile = File(...),
+    db: aiosqlite.Connection = Depends(get_db),
+    user_id: int = Depends(get_current_user_id),
+) -> SharedContextFileResponse:
+    """Upload a file into workspace/shared (no session required)."""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Filename is required")
+    ws = await fetch_active_workspace_path(db, user_id)
+    if not ws:
+        raise HTTPException(status_code=404, detail="No active workspace configured")
+    shared_dir = Path(ws) / "shared"
+    shared_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = Path(file.filename).name
+    dest = shared_dir / safe_name
+    content = await file.read()
+    async with aiofiles.open(dest, "wb") as f:
+        await f.write(content)
+    stat = dest.stat()
+    return SharedContextFileResponse(
+        name=safe_name,
+        relative_path=safe_name,
+        size_bytes=stat.st_size,
+        modified_at=datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc),
+        source="user",
     )
 
 
@@ -333,21 +407,22 @@ async def get_context_files(
     Returns:
         List of context files
     """
-    where_clauses = ["user_id = ?"]
+    where_clauses = ["cf.user_id = ?"]
     params = [user_id]
     
-    if session_id:
-        where_clauses.append("session_id = ?")
+    if session_id is not None:
+        where_clauses.append("cf.session_id = ?")
         params.append(session_id)
     
     where_clause = " AND ".join(where_clauses)
     
     cursor = await db.execute(
         f"""
-        SELECT id, filename, file_type, size_bytes, uploaded_at, is_indexed
-        FROM context_files
-        WHERE {where_clause}
-        ORDER BY uploaded_at DESC
+        SELECT cf.id, cf.filename, cf.file_type, cf.size_bytes, cf.uploaded_at, cf.is_indexed
+        FROM context_files cf
+        JOIN sessions s ON cf.session_id = s.id
+        WHERE {where_clause} -- s.deleted_at IS NULL can be added here if soft-delete is implemented
+        ORDER BY cf.uploaded_at DESC
         """,
         params
     )
@@ -433,7 +508,20 @@ async def upload_context_file(
     
     # Generate storage path
     now = utc_now()
-    file_ext = Path(file.filename).suffix
+    file_ext = Path(file.filename).suffix.lower()
+    
+    # Enforce allowed_file_types at storage step (SC-02)
+    if file_ext not in settings.allowed_file_types:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"File extension {file_ext} is not allowed."
+        )
+
+    # Never write files with executable or script extensions directly (SC-02)
+    dangerous_exts = {".exe", ".bat", ".cmd", ".com", ".pif", ".scr", ".vbs", ".js", ".jar", ".msi", ".dll", ".sh", ".py", ".ps1"}
+    if file_ext in dangerous_exts:
+        file_ext = file_ext + ".txt"
+
     stored_filename = f"{content_hash}{file_ext}"
     stored_path = settings.context_files_dir / stored_filename
     
@@ -561,7 +649,7 @@ async def get_artifacts(
     """
     params.append(user_id)
     
-    if session_id:
+    if session_id is not None:
         where_clauses.append("a.session_id = ?")
         params.append(session_id)
     
@@ -720,4 +808,3 @@ async def get_artifact(
         created_at=datetime.fromisoformat(row["created_at"])
     )
 
-# Made with Bob

@@ -1,7 +1,7 @@
 """
 Utilities Package
 
-This package contains utility modules for the IBM Bob backend:
+This package contains utility modules for the AI Orchestrator backend:
 - logger: Centralized logging configuration
 - validators: Common validation functions
 - exceptions: Custom exception classes and handlers
@@ -27,6 +27,7 @@ from .exceptions import (
     SessionNotFoundError,
     register_exception_handlers,
 )
+from .time import utc_now, utc_now_iso
 
 __all__ = [
     # Logger
@@ -49,6 +50,8 @@ __all__ = [
     "FileUploadError",
     "SessionNotFoundError",
     "register_exception_handlers",
+    # Time
+    "utc_now",
+    "utc_now_iso",
 ]
 
-# Made with Bob

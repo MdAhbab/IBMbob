@@ -1,6 +1,6 @@
 """
-IBM Bob Backend - Main FastAPI Application
-Provides REST API for the IBM Bob orchestrator system.
+AI Orchestrator - Main FastAPI Application
+Provides REST API for the multi-agent orchestration platform.
 """
 
 import logging
@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 from backend.config import settings
 from backend.database.models import HealthCheckResponse, ErrorResponse
 from backend.api.dependencies import get_db_connection, close_db_connection
+from backend.database.init_db import init_database
+from backend.utils.exceptions import register_exception_handlers
 
 # Import all route modules
 from backend.api.routes import (
@@ -30,6 +32,8 @@ from backend.api.routes import (
     analytics,
     settings as settings_routes,
     onboarding,
+    agents,
+    tools,
 )
 from backend.api.websockets import terminals as ws_terminals
 from backend.services.pty_service import pty_manager
@@ -49,16 +53,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     Handles startup and shutdown events.
     """
     # Startup
-    logger.info("Starting IBM Bob Backend...")
+    logger.info("Starting AI Orchestrator Backend...")
     logger.info(f"Environment: {'Development' if settings.debug else 'Production'}")
     logger.info(f"Database: {settings.database_path}")
     
-    # Initialize database connection
+    # Initialize schema/migrations then open connection (CRIT-002)
     try:
+        init_database(str(settings.database_path.resolve()), force=False)
         await get_db_connection()
-        logger.info("Database connection established")
+        logger.info("Database initialized and connection established")
     except Exception as e:
-        logger.error(f"Failed to connect to database: {e}")
+        logger.error(f"Failed to initialize database: {e}")
         raise
     
     # Create necessary directories
@@ -70,35 +75,41 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     # Bind PTY manager to the running event loop so reader threads can
     # safely dispatch output back to websocket connections.
     import asyncio as _asyncio
-    pty_manager.bind_loop(_asyncio.get_event_loop())
+    pty_manager.bind_loop(_asyncio.get_running_loop())
     
-    logger.info("IBM Bob Backend started successfully")
+    logger.info("AI Orchestrator Backend started successfully")
     
     yield
     
     # Shutdown
-    logger.info("Shutting down IBM Bob Backend...")
+    logger.info("Shutting down AI Orchestrator Backend...")
     
     # Stop any live PTY sessions cleanly.
     pty_manager.shutdown()
+
+    # Stop connection manager heartbeat task (CONC-07)
+    from backend.api.websockets import connection_manager
+    await connection_manager.stop_heartbeat()
 
     # Close database connection
     await close_db_connection()
     logger.info("Database connection closed")
     
-    logger.info("IBM Bob Backend shutdown complete")
+    logger.info("AI Orchestrator Backend shutdown complete")
 
 
 # Create FastAPI application
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
-    description="REST API for IBM Bob - AI Orchestrator System",
+    description="REST API for AI Orchestrator - Multi-Agent Orchestration Platform",
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json",
     lifespan=lifespan
 )
+
+register_exception_handlers(app)
 
 
 # Configure CORS middleware
@@ -206,11 +217,13 @@ app.include_router(workspace.router, prefix=settings.api_prefix)
 app.include_router(analytics.router, prefix=settings.api_prefix)
 app.include_router(settings_routes.router, prefix=settings.api_prefix)
 app.include_router(onboarding.router, prefix=settings.api_prefix)
+app.include_router(agents.router, prefix=settings.api_prefix)
+app.include_router(tools.router, prefix=settings.api_prefix)
 
 # WebSocket router (no /api prefix so URL stays /ws/terminals/<id>).
 app.include_router(ws_terminals.router)
 
-_bundled = os.getenv("BOB_BUNDLED", "").strip().lower() in ("1", "true", "yes")
+_bundled = os.getenv("ORCHESTRATOR_BUNDLED", os.getenv("BOB_BUNDLED", "")).strip().lower() in ("1", "true", "yes")
 _dist_dir = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 if _bundled and _dist_dir.is_dir():
     app.mount("/", StaticFiles(directory=str(_dist_dir), html=True), name="frontend")
@@ -252,4 +265,3 @@ if __name__ == "__main__":
         log_level=settings.log_level.lower()
     )
 
-# Made with Bob

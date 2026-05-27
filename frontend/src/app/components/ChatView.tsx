@@ -20,6 +20,7 @@ export type Division = {
   color: string;
   task: string;
   status: "queued" | "running" | "done";
+  parallel_group?: number;
 };
 
 export type Msg = {
@@ -61,7 +62,13 @@ function StatusPill({ s }: { s: Division["status"] }) {
   );
 }
 
-function DivisionsPanel({ divs }: { divs: Division[] }) {
+function DivisionsPanel({
+  divs,
+  enabledAgentIds,
+}: {
+  divs: Division[];
+  enabledAgentIds?: Set<string>;
+}) {
   const [open, setOpen] = useState(true);
   return (
     <div className="overflow-hidden rounded-xl border border-zinc-200/70 bg-zinc-50/60 dark:border-white/[0.06] dark:bg-black/30">
@@ -87,10 +94,23 @@ function DivisionsPanel({ divs }: { divs: Division[] }) {
             className="overflow-hidden"
           >
             <div className="space-y-1.5 border-t border-zinc-200/70 px-3 py-3 dark:border-white/[0.05]">
-              {divs.map((d, i) => (
+              {divs.map((d, i) => {
+                const slug = d.short.toLowerCase();
+                const disabled =
+                  enabledAgentIds != null &&
+                  enabledAgentIds.size > 0 &&
+                  !enabledAgentIds.has(slug) &&
+                  !Array.from(enabledAgentIds).some(
+                    (id) => slug.includes(id) || id.includes(slug),
+                  );
+                return (
                 <div
                   key={`${d.short}-${i}`}
-                  className="flex items-center gap-2.5 rounded-lg border border-zinc-200/70 bg-white px-3 py-2 dark:border-white/[0.05] dark:bg-white/[0.02]"
+                  className={`flex items-center gap-2.5 rounded-lg border px-3 py-2 dark:border-white/[0.05] ${
+                    disabled
+                      ? "border-zinc-200/40 bg-zinc-100/50 opacity-50 dark:bg-white/[0.01]"
+                      : "border-zinc-200/70 bg-white dark:bg-white/[0.02]"
+                  }`}
                 >
                   <span
                     className="h-1.5 w-1.5 shrink-0 rounded-full"
@@ -105,10 +125,19 @@ function DivisionsPanel({ divs }: { divs: Division[] }) {
                     <div className="truncate font-mono text-[10.5px] text-zinc-500">
                       {d.task}
                     </div>
+                    {d.parallel_group != null && (
+                      <div className="mt-0.5 font-mono text-[9px] text-indigo-500/80">
+                        ∥ group {d.parallel_group}
+                      </div>
+                    )}
                   </div>
-                  <StatusPill s={d.status} />
+                  <StatusPill s={disabled ? "queued" : d.status} />
+                  {disabled && (
+                    <span className="font-mono text-[9px] text-zinc-400">agent off</span>
+                  )}
                 </div>
-              ))}
+                );
+              })}
             </div>
           </motion.div>
         )}
@@ -167,10 +196,14 @@ export function ChatView({
   msgs,
   onSuggest,
   onOpenProcesses,
+  onReroute,
+  enabledAgentIds,
 }: {
   msgs: Msg[];
   onSuggest: (text: string) => void;
-  onOpenProcesses: () => void;
+  onOpenProcesses: (divisions?: Division[]) => void;
+  onReroute?: (msg: Msg) => void;
+  enabledAgentIds?: Set<string>;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -203,7 +236,13 @@ export function ChatView({
         ) : (
           <div className="space-y-6">
             {msgs.map((m) => (
-              <MessageBubble key={m.id} m={m} onOpenProcesses={onOpenProcesses} />
+              <MessageBubble
+                key={m.id}
+                m={m}
+                onOpenProcesses={onOpenProcesses}
+                onReroute={onReroute}
+                enabledAgentIds={enabledAgentIds}
+              />
             ))}
           </div>
         )}
@@ -230,7 +269,17 @@ function EmptyState() {
   );
 }
 
-function MessageBubble({ m, onOpenProcesses }: { m: Msg; onOpenProcesses: () => void }) {
+function MessageBubble({
+  m,
+  onOpenProcesses,
+  onReroute,
+  enabledAgentIds,
+}: {
+  m: Msg;
+  onOpenProcesses: (divisions?: Division[]) => void;
+  onReroute?: (msg: Msg) => void;
+  enabledAgentIds?: Set<string>;
+}) {
   if (m.role === "user") {
     return (
       <motion.div
@@ -259,7 +308,7 @@ function MessageBubble({ m, onOpenProcesses }: { m: Msg; onOpenProcesses: () => 
         <div className="flex items-baseline gap-2">
           <span className="text-[12.5px] text-zinc-900 dark:text-white">Orchestrator</span>
           <span className="font-mono text-[9.5px] text-zinc-500">
-            {m.model ?? "granite-3.2 · ibm-cloud"}
+            {m.model ?? "orchestrator"}
           </span>
           <span className="font-mono text-[9.5px] text-zinc-400">{m.ts}</span>
         </div>
@@ -268,7 +317,9 @@ function MessageBubble({ m, onOpenProcesses }: { m: Msg; onOpenProcesses: () => 
         </div>
 
         {m.thinking && <ThinkingPanel items={m.thinking} />}
-        {m.divisions && m.divisions.length > 0 && <DivisionsPanel divs={m.divisions} />}
+        {m.divisions && m.divisions.length > 0 && (
+          <DivisionsPanel divs={m.divisions} enabledAgentIds={enabledAgentIds} />
+        )}
 
         {m.artifacts && m.artifacts.length > 0 && (
           <div className="flex flex-wrap items-center gap-1.5">
@@ -281,13 +332,17 @@ function MessageBubble({ m, onOpenProcesses }: { m: Msg; onOpenProcesses: () => 
 
         <div className="flex items-center gap-2 pt-1">
           <button
-            onClick={onOpenProcesses}
+            onClick={() => onOpenProcesses(m.divisions)}
             className="flex items-center gap-1 rounded-md border border-zinc-200/70 bg-white px-2 py-1 text-[11px] text-zinc-700 transition hover:bg-zinc-50 dark:border-white/[0.07] dark:bg-white/[0.02] dark:text-zinc-300 dark:hover:bg-white/[0.05]"
           >
             <Workflow className="h-3 w-3" />
             Watch processes
           </button>
-          <button className="flex items-center gap-1 rounded-md border border-zinc-200/70 bg-white px-2 py-1 text-[11px] text-zinc-700 transition hover:bg-zinc-50 dark:border-white/[0.07] dark:bg-white/[0.02] dark:text-zinc-300 dark:hover:bg-white/[0.05]">
+          <button
+            onClick={() => onReroute?.(m)}
+            disabled={!m.divisions?.length}
+            className="flex items-center gap-1 rounded-md border border-zinc-200/70 bg-white px-2 py-1 text-[11px] text-zinc-700 transition hover:bg-zinc-50 disabled:opacity-40 dark:border-white/[0.07] dark:bg-white/[0.02] dark:text-zinc-300 dark:hover:bg-white/[0.05]"
+          >
             <Zap className="h-3 w-3" />
             Re-route
           </button>

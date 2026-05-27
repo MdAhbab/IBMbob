@@ -10,6 +10,7 @@ import {
   Sparkles,
   Check,
 } from "lucide-react";
+import { apiFetch } from "../lib/api";
 
 export type CtxFile = {
   id: string;
@@ -30,6 +31,48 @@ export const INITIAL_CTX: CtxFile[] = [
   { id: "6", name: "task-graph.md", size: "1.8 kb", status: "synced", agents: 6, source: "orchestrator" },
   { id: "7", name: "CHANGELOG.md", size: "6.7 kb", status: "stale", agents: 2, source: "user" },
 ];
+
+async function uploadSharedFile(file: File): Promise<void> {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await apiFetch("/workspace/shared", { method: "POST", body: form, timeoutMs: 30_000 });
+  if (!res.ok) {
+    throw new Error(`Upload failed (${res.status})`);
+  }
+}
+
+async function uploadSharedFiles(
+  fileList: FileList | File[],
+  setFiles: React.Dispatch<React.SetStateAction<CtxFile[]>>,
+  agentCount: number,
+  onResync?: () => void,
+) {
+  const files = Array.from(fileList);
+  const placeholders: CtxFile[] = files.map((f, i) => ({
+    id: `${Date.now()}-${i}`,
+    name: f.name,
+    size: `${(f.size / 1024).toFixed(1)} kb`,
+    status: "syncing",
+    agents: agentCount,
+    source: "user",
+  }));
+  setFiles((p) => [...placeholders, ...p]);
+  for (let i = 0; i < files.length; i++) {
+    try {
+      await uploadSharedFile(files[i]);
+      const id = placeholders[i].id;
+      setFiles((p) =>
+        p.map((f) => (f.id === id ? { ...f, status: "synced" as const } : f)),
+      );
+    } catch {
+      const id = placeholders[i].id;
+      setFiles((p) =>
+        p.map((f) => (f.id === id ? { ...f, status: "stale" as const } : f)),
+      );
+    }
+  }
+  onResync?.();
+}
 
 export function ContextDropzone({
   files,
@@ -115,15 +158,7 @@ export function ContextDropzone({
             onDrop={(e) => {
               e.preventDefault();
               setDrag(false);
-              const dropped: CtxFile[] = Array.from(e.dataTransfer.files).map((f, i) => ({
-                id: `${Date.now()}-${i}`,
-                name: f.name,
-                size: `${(f.size / 1024).toFixed(1)} kb`,
-                status: "syncing",
-                agents: 0,
-                source: "user",
-              }));
-              setFiles((p) => [...dropped, ...p]);
+              void uploadSharedFiles(e.dataTransfer.files, setFiles, agentCount, onResync);
             }}
             className={`m-3 flex cursor-pointer flex-col items-center justify-center gap-1.5 rounded-lg border border-dashed py-6 transition ${
               drag
@@ -131,7 +166,17 @@ export function ContextDropzone({
                 : "border-zinc-300/70 bg-zinc-50/50 hover:border-zinc-400 dark:border-white/[0.08] dark:bg-white/[0.015] dark:hover:border-white/[0.18]"
             }`}
           >
-            <input type="file" multiple className="hidden" />
+            <input
+              type="file"
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                if (e.target.files?.length) {
+                  void uploadSharedFiles(e.target.files, setFiles, agentCount, onResync);
+                  e.target.value = "";
+                }
+              }}
+            />
             <Upload className="h-4 w-4 text-zinc-400" />
             <div className="text-[12px] text-zinc-700 dark:text-zinc-300">Drop context files</div>
             <div className="font-mono text-[9px] text-zinc-500">

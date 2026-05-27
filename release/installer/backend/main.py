@@ -30,8 +30,8 @@ def get_app_dir() -> Path:
         # Running as compiled executable
         # type: ignore - _MEIPASS is added by PyInstaller at runtime
         return Path(getattr(sys, '_MEIPASS', '.'))
-    # Running as script
-    return Path(__file__).parent.parent.parent
+    # release/installer/backend/main.py -> parents[3] is repo root
+    return Path(__file__).resolve().parents[3]
 
 
 def find_available_port(start_port: int = 8000, max_attempts: int = 10) -> int:
@@ -154,13 +154,18 @@ def main():
     # Import FastAPI app
     print("\n[START] Starting server...")
     try:
-        # Add backend to path if needed
-        backend_path = app_dir / 'backend'
-        if backend_path.exists() and str(backend_path) not in sys.path:
-            sys.path.insert(0, str(backend_path))
-        
+        # Add repo root to path so backend.main resolves
+        repo_root = app_dir if (app_dir / 'backend' / 'main.py').is_file() else app_dir
+        if str(repo_root) not in sys.path:
+            sys.path.insert(0, str(repo_root))
+
+        os.environ.setdefault(
+            "ORCHESTRATOR_BUNDLED",
+            os.environ.get("BOB_BUNDLED", "1"),
+        )
+
         # Import the FastAPI application
-        from app.main import app  # type: ignore
+        from backend.main import app  # type: ignore
         
         # Check for frontend files
         frontend_dir = app_dir / 'frontend' / 'dist'

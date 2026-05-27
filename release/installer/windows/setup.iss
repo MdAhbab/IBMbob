@@ -21,11 +21,12 @@ AppUpdatesURL={#MyAppURL}/releases
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
-LicenseFile=..\LICENSE
+; License at repo root (release/installer/windows -> ../../../LICENSE)
+LicenseFile=..\..\..\LICENSE
 InfoBeforeFile=README.txt
 OutputDir=..\dist\windows
 OutputBaseFilename=orchestrator-setup
-SetupIconFile=icon.ico
+; SetupIconFile=icon.ico  ; optional — add icon.ico beside this script before release builds
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
@@ -52,7 +53,7 @@ Source: "..\workspace\*.template"; DestDir: "{userdocs}\AI-Orchestrator-Workspac
 
 ; Documentation
 Source: "README.txt"; DestDir: "{app}"; Flags: ignoreversion isreadme
-Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]

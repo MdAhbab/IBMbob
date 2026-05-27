@@ -1,14 +1,14 @@
 """
-IBM Bob desktop launcher: tray icon, local FastAPI (bundled static UI), opens browser.
+Orchestrator desktop launcher: tray icon, local FastAPI (bundled static UI), opens browser.
 
 When frozen with PyInstaller, expects layout:
   <install>/
-    IBM Bob.exe
+    Orchestrator.exe
     backend/
     frontend/dist/
     python/   (optional embeddable interpreter)
 
-Per-user data: %LOCALAPPDATA%\\IBMBob\\
+Per-user data: %LOCALAPPDATA%\\Orchestrator\\
 """
 
 from __future__ import annotations
@@ -32,7 +32,10 @@ def _find_repo_root() -> Path:
 
 
 def install_root() -> Path:
-    env = os.environ.get("BOB_INSTALL_ROOT", "").strip()
+    env = (
+        os.environ.get("ORCHESTRATOR_INSTALL_ROOT")
+        or os.environ.get("BOB_INSTALL_ROOT", "")
+    ).strip()
     if env:
         return Path(env)
     if getattr(sys, "frozen", False):
@@ -41,8 +44,15 @@ def install_root() -> Path:
 
 
 def user_data_dir() -> Path:
-    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-    d = Path(base) / "IBMBob"
+    override = (
+        os.environ.get("ORCHESTRATOR_USER_DATA")
+        or os.environ.get("IBMBOB_USER_DATA", "")
+    ).strip()
+    if override:
+        d = Path(override)
+    else:
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        d = Path(base) / "Orchestrator"
     (d / "data").mkdir(parents=True, exist_ok=True)
     (d / "logs").mkdir(parents=True, exist_ok=True)
     return d
@@ -72,8 +82,10 @@ def ensure_user_env(udata: Path, root: Path) -> None:
     db = udata / "data" / "bob.db"
     os.environ["DATABASE_PATH"] = str(db)
     os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///" + str(db).replace("\\", "/")
-    os.environ["BOB_BUNDLED"] = "1"
-    os.environ["IBMBOB_USER_DATA"] = str(udata)
+    os.environ["ORCHESTRATOR_BUNDLED"] = "1"
+    os.environ.setdefault("BOB_BUNDLED", "1")
+    os.environ["ORCHESTRATOR_USER_DATA"] = str(udata)
+    os.environ.setdefault("IBMBOB_USER_DATA", str(udata))
     if env_file.is_file():
         os.environ["DOTENV_PATH"] = str(env_file)
 
@@ -144,9 +156,9 @@ def main() -> None:
             _icon.stop()
 
         icon = pystray.Icon(
-            "ibm_bob",
+            "orchestrator",
             icon_image(),
-            "IBM Bob",
+            "Orchestrator",
             menu=pystray.Menu(
                 pystray.MenuItem("Open", on_open),
                 pystray.MenuItem("Quit", on_quit),
@@ -154,7 +166,7 @@ def main() -> None:
         )
         icon.run()
     except ImportError:
-        print(f"IBM Bob running at {url} (install pystray + pillow for tray)")
+        print(f"Orchestrator running at {url} (install pystray + pillow for tray)")
         try:
             proc.wait()
         except KeyboardInterrupt:

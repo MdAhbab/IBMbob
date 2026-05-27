@@ -12,12 +12,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import secrets
 import sys
 import threading
 import time
 from collections import deque
 from pathlib import Path
-from typing import Callable, Deque, Dict, List, Optional
+from typing import Callable, Deque, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,9 @@ class PtySession:
         self._started_at: float = time.time()
         self._status: str = "starting"
         self._lock = threading.Lock()
+        self.user_id: Optional[int] = None
+        self._idle_timer: Optional[threading.Timer] = None
+        self._idle_seconds: float = 90.0
 
     @property
     def status(self) -> str:
@@ -151,7 +155,7 @@ class PtySession:
                         alive = False
                     if not alive:
                         idle_strikes += 1
-                        if idle_strikes > 3:
+                        if idle_strikes > 10:
                             break
                     else:
                         idle_strikes = 0
@@ -174,7 +178,7 @@ class PtySession:
             except Exception:
                 self._exit_code = None
             self._status = "exited"
-            self._dispatch("\r\n[bob] process exited\r\n", system=True)
+            self._dispatch("\r\n[orch] process exited\r\n", system=True)
 
     def _dispatch(self, chunk: str, system: bool = False) -> None:
         # Snapshot the subscriber list to avoid holding the lock during callbacks.
@@ -189,6 +193,9 @@ class PtySession:
     def attach(self, callback: Callable[[str], None]) -> None:
         with self._lock:
             self._subscribers.append(callback)
+            if self._idle_timer is not None:
+                self._idle_timer.cancel()
+                self._idle_timer = None
 
     def detach(self, callback: Callable[[str], None]) -> None:
         with self._lock:
@@ -196,6 +203,26 @@ class PtySession:
                 self._subscribers.remove(callback)
             except ValueError:
                 pass
+            if not self._subscribers:
+                self._schedule_idle_teardown()
+
+    def subscriber_count(self) -> int:
+        with self._lock:
+            return len(self._subscribers)
+
+    def _schedule_idle_teardown(self) -> None:
+        if self._idle_timer is not None:
+            self._idle_timer.cancel()
+
+        def _teardown() -> None:
+            with self._lock:
+                if self._subscribers:
+                    return
+            pty_manager.remove(self.runtime_id)
+
+        self._idle_timer = threading.Timer(self._idle_seconds, _teardown)
+        self._idle_timer.daemon = True
+        self._idle_timer.start()
 
     def write(self, data: str) -> None:
         if self._pty is None or not self._pty.isalive():
@@ -216,12 +243,30 @@ class PtySession:
             logger.debug(f"pty resize ignored: {e}")
 
     def pause(self) -> None:
-        """Best-effort pause: Windows has no SIGSTOP, so we just mark status."""
+        """Best-effort pause: Suspend Windows process via ntdll."""
         self._status = "paused"
+        if sys.platform == "win32" and self._pid:
+            try:
+                import ctypes
+                handle = ctypes.windll.kernel32.OpenProcess(0x0800, False, self._pid)
+                if handle:
+                    ctypes.windll.ntdll.NtSuspendProcess(handle)
+                    ctypes.windll.kernel32.CloseHandle(handle)
+            except Exception as e:
+                logger.warning(f"Failed to suspend process {self._pid}: {e}")
 
     def resume(self) -> None:
         if self._pty is not None and self._pty.isalive():
             self._status = "running"
+            if sys.platform == "win32" and self._pid:
+                try:
+                    import ctypes
+                    handle = ctypes.windll.kernel32.OpenProcess(0x0800, False, self._pid)
+                    if handle:
+                        ctypes.windll.ntdll.NtResumeProcess(handle)
+                        ctypes.windll.kernel32.CloseHandle(handle)
+                except Exception as e:
+                    logger.warning(f"Failed to resume process {self._pid}: {e}")
 
     def kill(self) -> None:
         self._stopped.set()
@@ -257,6 +302,34 @@ class PtyManager:
     def __init__(self) -> None:
         self._sessions: Dict[int, PtySession] = {}
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._lock = threading.Lock()
+        self._ws_tokens: Dict[int, Tuple[str, float]] = {}
+
+    def generate_ws_token(self, runtime_id: int) -> str:
+        with self._lock:
+            now = time.time()
+            if runtime_id in self._ws_tokens:
+                token, expires = self._ws_tokens[runtime_id]
+                if expires - now > 15.0:
+                    return token
+            token = secrets.token_hex(16)
+            self._ws_tokens[runtime_id] = (token, now + 30.0)
+            return token
+
+    def verify_ws_token(self, runtime_id: int, token: Optional[str]) -> bool:
+        if not token:
+            return False
+        with self._lock:
+            if runtime_id not in self._ws_tokens:
+                return False
+            stored_token, expires = self._ws_tokens[runtime_id]
+            if time.time() > expires:
+                del self._ws_tokens[runtime_id]
+                return False
+            is_valid = secrets.compare_digest(stored_token, token)
+            if is_valid:
+                del self._ws_tokens[runtime_id]
+            return is_valid
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
@@ -264,23 +337,32 @@ class PtyManager:
     @property
     def loop(self) -> asyncio.AbstractEventLoop:
         if self._loop is None:
-            self._loop = asyncio.get_event_loop()
+            self._loop = asyncio.get_running_loop()
         return self._loop
 
     def has(self, runtime_id: int) -> bool:
-        return runtime_id in self._sessions
+        with self._lock:
+            return runtime_id in self._sessions
 
     def get(self, runtime_id: int) -> Optional[PtySession]:
-        return self._sessions.get(runtime_id)
+        with self._lock:
+            return self._sessions.get(runtime_id)
 
-    def active_for_provider(self, provider_id: int) -> Optional[PtySession]:
-        for session in self._sessions.values():
-            if session.provider_id == provider_id and session.is_alive():
+    def active_for_provider(
+        self, provider_id: int, user_id: Optional[int] = None
+    ) -> Optional[PtySession]:
+        with self._lock:
+            for session in list(self._sessions.values()):
+                if session.provider_id != provider_id or not session.is_alive():
+                    continue
+                if user_id is not None and session.user_id not in (None, user_id):
+                    continue
                 return session
-        return None
+            return None
 
     def list_active(self) -> List[PtySession]:
-        return [s for s in self._sessions.values() if s.is_alive()]
+        with self._lock:
+            return [s for s in list(self._sessions.values()) if s.is_alive()]
 
     def create(
         self,
@@ -288,28 +370,37 @@ class PtyManager:
         provider_id: Optional[int],
         provider_name: str,
         cwd: str,
+        user_id: Optional[int] = None,
     ) -> PtySession:
-        if runtime_id in self._sessions:
-            return self._sessions[runtime_id]
-        session = PtySession(
-            runtime_id=runtime_id,
-            provider_id=provider_id,
-            provider_name=provider_name,
-            cwd=cwd,
-        )
-        session.start(self.loop)
-        self._sessions[runtime_id] = session
-        return session
+        with self._lock:
+            if runtime_id in self._sessions:
+                existing = self._sessions[runtime_id]
+                if user_id is not None:
+                    existing.user_id = user_id
+                return existing
+            session = PtySession(
+                runtime_id=runtime_id,
+                provider_id=provider_id,
+                provider_name=provider_name,
+                cwd=cwd,
+            )
+            session.user_id = user_id
+            session.start(self.loop)
+            self._sessions[runtime_id] = session
+            return session
 
     def remove(self, runtime_id: int) -> None:
-        session = self._sessions.pop(runtime_id, None)
+        with self._lock:
+            session = self._sessions.pop(runtime_id, None)
         if session is not None:
             session.kill()
 
     def shutdown(self) -> None:
-        for s in list(self._sessions.values()):
+        with self._lock:
+            sessions = list(self._sessions.values())
+            self._sessions.clear()
+        for s in sessions:
             s.kill()
-        self._sessions.clear()
 
 
 # Global singleton consumed by routes + websockets.

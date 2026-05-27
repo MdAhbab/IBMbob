@@ -1,5 +1,5 @@
 """
-API routes package for IBM Bob Backend.
+API routes package for AI Orchestrator Backend.
 Contains all API endpoint implementations.
 """
 
@@ -24,4 +24,3 @@ __all__ = [
     "settings"
 ]
 
-# Made with Bob

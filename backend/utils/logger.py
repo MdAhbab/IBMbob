@@ -278,4 +278,3 @@ class LoggerAdapter(logging.LoggerAdapter):
 
         return msg, kwargs
 
-# Made with Bob

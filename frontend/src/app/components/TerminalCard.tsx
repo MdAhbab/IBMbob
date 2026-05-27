@@ -15,7 +15,8 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 
 import { Dropdown } from "./Sidebar";
-import { apiPath, wsPath } from "../lib/api";
+import { apiPath, apiFetch, wsPath } from "../lib/api";
+import { trackAnalyticsEvent } from "../lib/analyticsClient";
 import { cliInstallForProvider } from "../lib/cliInstall";
 
 type AuthMethod = "api_key" | "oauth" | "ssh" | "bearer" | "account";
@@ -27,6 +28,7 @@ export type CliRuntime = {
   providerId?: number;
   /** Live PTY runtime id (created by POST /api/runtimes/spawn). */
   runtimeId?: number;
+  wsUrl?: string;
   name: string;
   glyph: string;
   model: string;
@@ -85,7 +87,7 @@ function commandForAssignedTask(cli: CliRuntime) {
     case "cline":
       return `cline ${task}\r`;
     default:
-      return `Write-Host ${psQuote(`[bob] Assigned task: ${cli.task ?? ""}`)}\r`;
+      return `Write-Host ${psQuote(`[orch] Assigned task: ${cli.task ?? ""}`)}\r`;
   }
 }
 
@@ -93,11 +95,20 @@ export function TerminalCard({
   cli,
   defaultMenuOpen = false,
   onRuntime,
+  lazyConnect = false,
+  spawnAllowed = true,
+  highlighted = false,
 }: {
   cli: CliRuntime;
   defaultMenuOpen?: boolean;
   /** Notify the parent when the runtime id materialises (post-spawn). */
   onRuntime?: (providerId: number | undefined, runtimeId: number | undefined) => void;
+  /** When true, defer spawn until user clicks Connect (HIGH-008). */
+  lazyConnect?: boolean;
+  /** Respect orchestrator parallelism cap (HIGH-008). */
+  spawnAllowed?: boolean;
+  /** Highlight card when user clicks Watch processes (HIGH-045). */
+  highlighted?: boolean;
 }) {
   const [menuOpen, setMenuOpen] = useState(defaultMenuOpen);
   const [model, setModel] = useState(cli.model);
@@ -105,17 +116,24 @@ export function TerminalCard({
   const [askPrompt, setAskPrompt] = useState("");
   const [askOpen, setAskOpen] = useState(false);
   const [paused, setPaused] = useState(false);
+  const [connectRequested, setConnectRequested] = useState(!lazyConnect);
   const [runtimeId, setRuntimeId] = useState<number | undefined>(cli.runtimeId);
+  const [wsUrl, setWsUrl] = useState<string | undefined>(cli.wsUrl);
+  const spawnInProgressRef = useRef(false);
+  const reconnectAttemptsRef = useRef(0);
+  const reconnectTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     setRuntimeId(cli.runtimeId);
-  }, [cli.runtimeId]);
+    setWsUrl(cli.wsUrl);
+  }, [cli.runtimeId, cli.wsUrl]);
 
   const termContainer = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
-  const sendBufRef = useRef<string>(""); // input line buffer for the Send button
+  const onDataDisposeRef = useRef<(() => void) | null>(null);
+  const sendBufRef = useRef<string>("");
   const assignedTaskSentRef = useRef<string | null>(null);
   const cardInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -174,16 +192,34 @@ export function TerminalCard({
     };
   }, []);
 
+  useEffect(() => {
+    if (cli.task && lazyConnect) setConnectRequested(true);
+  }, [cli.task, lazyConnect]);
+
   // Spawn a runtime if we don't have one yet, then attach WS.
   useEffect(() => {
+    if (!connectRequested && runtimeId == null && cli.runtimeId == null) {
+      setWsStatus("closed");
+      return;
+    }
+    if (!spawnAllowed && runtimeId == null && cli.runtimeId == null) {
+      setWsStatus("closed");
+      return;
+    }
     let cancelled = false;
 
     const ensureRuntimeAndConnect = async () => {
       let rid = runtimeId ?? cli.runtimeId;
+      let currentWsUrl = wsUrl ?? cli.wsUrl;
       try {
         if (rid == null) {
+          if (spawnInProgressRef.current) {
+            console.log("Spawn already in progress, skipping duplicate spawn call.");
+            return;
+          }
+          spawnInProgressRef.current = true;
           setWsStatus("spawning");
-          const res = await fetch(apiPath("/runtimes/spawn"), {
+          const res = await apiFetch("/runtimes/spawn", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -192,24 +228,32 @@ export function TerminalCard({
               cols: termRef.current?.cols ?? 120,
               rows: termRef.current?.rows ?? 30,
             }),
+            timeoutMs: 30_000,
           });
+          spawnInProgressRef.current = false;
           if (!res.ok) {
             const body = await res.text().catch(() => "");
             throw new Error(`spawn failed (${res.status}): ${body}`);
           }
           const data = await res.json();
           rid = data.runtime_id as number;
+          currentWsUrl = data.ws_url as string;
           if (cancelled) return;
           setRuntimeId(rid);
+          setWsUrl(currentWsUrl);
           onRuntime?.(cli.providerId, rid);
         }
       } catch (e) {
+        spawnInProgressRef.current = false;
         console.error("Failed to spawn runtime:", e);
-        termRef.current?.writeln(`\x1b[31m[bob] failed to start terminal: ${e}\x1b[0m`);
+        void trackAnalyticsEvent("spawn_failed", {
+          metadata: { provider: cli.id, error: String(e) },
+        });
+        termRef.current?.writeln(`\x1b[31m[orch] failed to start terminal: ${e}\x1b[0m`);
         const install = cliInstallForProvider(cli.id);
         if (install) {
-          termRef.current?.writeln(`\x1b[33m[bob] install CLI:\x1b[0m ${install.install}`);
-          termRef.current?.writeln(`\x1b[33m[bob] verify:\x1b[0m ${install.verify}`);
+          termRef.current?.writeln(`\x1b[33m[orch] install CLI:\x1b[0m ${install.install}`);
+          termRef.current?.writeln(`\x1b[33m[orch] verify:\x1b[0m ${install.verify}`);
         }
         setWsStatus("error");
         return;
@@ -217,19 +261,20 @@ export function TerminalCard({
 
       if (cancelled || rid == null) return;
 
-      const url = wsPath(`/ws/terminals/${rid}`);
+      const path = currentWsUrl || `/ws/terminals/${rid}`;
+      const url = wsPath(path);
       setWsStatus("connecting");
       const ws = new WebSocket(url);
       wsRef.current = ws;
 
       ws.onopen = () => {
+        reconnectAttemptsRef.current = 0;
         setWsStatus("open");
-        // Hand the user's keystrokes through.
-        termRef.current?.onData((data) => {
+        onDataDisposeRef.current?.();
+        const disposable = termRef.current?.onData((data) => {
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: "input", data }));
           }
-          // Track current line so the explicit Send button can flush it.
           if (data === "\r") {
             sendBufRef.current = "";
           } else if (data === "\u007f") {
@@ -238,45 +283,85 @@ export function TerminalCard({
             sendBufRef.current += data;
           }
         });
+        onDataDisposeRef.current = () => {
+          try {
+            disposable?.dispose();
+          } catch {}
+        };
       };
 
       ws.onmessage = (ev) => {
         try {
           const msg = JSON.parse(ev.data);
-          if (msg.type === "output" || msg.type === "ask.token") {
+          if (msg.type === "hello") {
+            termRef.current?.writeln(
+              `\r\n\x1b[36m[orch] connected · ${msg.provider_name ?? cli.name} · pid ${msg.pid ?? "?"}\x1b[0m`,
+            );
+            if (msg.status === "exited") {
+              termRef.current?.writeln(`\r\n\x1b[33m[orch] runtime already exited\x1b[0m`);
+            }
+          } else if (msg.type === "division.status") {
+            window.dispatchEvent(
+              new CustomEvent("orch:division-status", {
+                detail: { short: msg.short, status: msg.status ?? "done" },
+              }),
+            );
+          } else if (msg.type === "output" || msg.type === "ask.token") {
             const colored =
               msg.type === "ask.token"
                 ? `\x1b[35m${msg.text ?? msg.data ?? ""}\x1b[0m`
                 : (msg.data ?? msg.text ?? "");
             termRef.current?.write(colored);
           } else if (msg.type === "status") {
-            termRef.current?.writeln(`\r\n\x1b[33m[bob] status: ${msg.state}\x1b[0m`);
+            termRef.current?.writeln(`\r\n\x1b[33m[orch] status: ${msg.state}\x1b[0m`);
           } else if (msg.type === "ask.done") {
-            termRef.current?.write(`\r\n\x1b[35m[bob] (granite) ✓\x1b[0m\r\n`);
+            termRef.current?.write(`\r\n\x1b[35m[orch] (llm) ✓\x1b[0m\r\n`);
           } else if (msg.type === "ask.error") {
-            termRef.current?.writeln(`\r\n\x1b[31m[bob] ask error: ${msg.error}\x1b[0m`);
+            termRef.current?.writeln(`\r\n\x1b[31m[orch] ask error: ${msg.error}\x1b[0m`);
           } else if (msg.type === "error") {
-            termRef.current?.writeln(`\r\n\x1b[31m[bob] error: ${msg.error}\x1b[0m`);
+            termRef.current?.writeln(`\r\n\x1b[31m[orch] error: ${msg.error}\x1b[0m`);
           }
         } catch {
           // Ignore non-JSON frames
         }
       };
       ws.onerror = () => setWsStatus("error");
-      ws.onclose = () => setWsStatus("closed");
+      ws.onclose = () => {
+        setWsStatus("closed");
+        if (cancelled) return;
+
+        // Automatic reconnection with exponential backoff
+        const maxAttempts = 3;
+        if (reconnectAttemptsRef.current < maxAttempts) {
+          const delay = Math.pow(2, reconnectAttemptsRef.current) * 1000;
+          console.log(`WebSocket closed. Retrying connection in ${delay}ms (attempt ${reconnectAttemptsRef.current + 1}/${maxAttempts})`);
+          reconnectAttemptsRef.current += 1;
+
+          if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current);
+          reconnectTimerRef.current = window.setTimeout(() => {
+            if (!cancelled) {
+              void ensureRuntimeAndConnect();
+            }
+          }, delay);
+        }
+      };
     };
 
     void ensureRuntimeAndConnect();
 
     return () => {
       cancelled = true;
+      onDataDisposeRef.current?.();
+      onDataDisposeRef.current = null;
+      if (reconnectTimerRef.current) {
+        window.clearTimeout(reconnectTimerRef.current);
+      }
       try {
         wsRef.current?.close();
       } catch {}
       wsRef.current = null;
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cli.providerId, cli.runtimeId]);
+  }, [cli.providerId, cli.runtimeId, connectRequested, runtimeId, wsUrl, lazyConnect, spawnAllowed]);
 
   const sendInput = (text: string) => {
     const ws = wsRef.current;
@@ -291,7 +376,7 @@ export function TerminalCard({
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
     assignedTaskSentRef.current = task;
     const command = commandForAssignedTask(cli);
-    termRef.current?.writeln(`\r\n\x1b[36m[bob] dispatching assigned task to ${cli.name}\x1b[0m`);
+    termRef.current?.writeln(`\r\n\x1b[36m[orch] dispatching assigned task to ${cli.name}\x1b[0m`);
     sendInput(command);
   };
 
@@ -313,7 +398,7 @@ export function TerminalCard({
   const handleReload = async () => {
     if (runtimeId != null) {
       try {
-        await fetch(apiPath(`/runtimes/${runtimeId}`), { method: "DELETE" });
+        await apiFetch(`/runtimes/${runtimeId}`, { method: "DELETE" });
       } catch {}
       try {
         wsRef.current?.close();
@@ -328,7 +413,7 @@ export function TerminalCard({
   const handlePause = async () => {
     if (runtimeId == null) return;
     try {
-      await fetch(apiPath(`/runtimes/${runtimeId}/${paused ? "resume" : "pause"}`), {
+      await apiFetch(`/runtimes/${runtimeId}/${paused ? "resume" : "pause"}`, {
         method: "POST",
       });
       setPaused((p) => !p);
@@ -349,7 +434,7 @@ export function TerminalCard({
   const handleApprove = async (approved: boolean) => {
     if (runtimeId == null) return;
     try {
-      await fetch(apiPath(`/runtimes/${runtimeId}/approve`), {
+      await apiFetch(`/runtimes/${runtimeId}/approve`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ approved, reason: approved ? "user approved" : "user denied" }),
@@ -364,7 +449,7 @@ export function TerminalCard({
     const q = askPrompt.trim();
     if (!ws || ws.readyState !== WebSocket.OPEN || !q) return;
     ws.send(JSON.stringify({ type: "ask", prompt: q, model }));
-    termRef.current?.write(`\r\n\x1b[35m[bob] > ${q}\x1b[0m\r\n`);
+    termRef.current?.write(`\r\n\x1b[35m[orch] > ${q}\x1b[0m\r\n`);
     setAskPrompt("");
   };
 
@@ -391,7 +476,11 @@ export function TerminalCard({
   }, [wsStatus, paused, s.cls, s.label]);
 
   return (
-    <div className="group relative flex h-full min-h-[420px] flex-col overflow-hidden rounded-xl border border-zinc-200/70 bg-white/80 transition hover:border-zinc-300 dark:border-white/[0.07] dark:bg-zinc-950/70 dark:hover:border-white/[0.14]">
+    <div className={`group relative flex h-full min-h-[420px] flex-col overflow-hidden rounded-xl border bg-white/80 transition dark:bg-zinc-950/70 ${
+      highlighted
+        ? "border-indigo-400 ring-2 ring-indigo-400/40 dark:border-indigo-400/60"
+        : "border-zinc-200/70 hover:border-zinc-300 dark:border-white/[0.07] dark:hover:border-white/[0.14]"
+    }`}>
       <div className="flex items-center justify-between gap-2 border-b border-zinc-200/70 px-4 py-2.5 dark:border-white/[0.05]">
         <div className="flex min-w-0 items-center gap-2">
           <span className={`${cli.color} shrink-0 font-mono text-[18px] leading-none`}>
@@ -412,7 +501,6 @@ export function TerminalCard({
               options={cli.models}
               onChange={setModel}
               className="w-[140px]"
-              listWidth="w-[180px] right-0"
             />
           </div>
           <span
@@ -428,7 +516,7 @@ export function TerminalCard({
           </span>
           <button
             onClick={() => setAskOpen((o) => !o)}
-            title="Ask BOB (IBM Granite)"
+            title="Ask orchestrator"
             className={`rounded p-1 ${askOpen ? "bg-indigo-100 text-indigo-700 dark:bg-indigo-400/10 dark:text-indigo-300" : "text-zinc-400 hover:bg-zinc-100 dark:hover:bg-white/5"}`}
           >
             <Sparkles className="h-3 w-3" />
@@ -542,14 +630,36 @@ export function TerminalCard({
             {cli.id}.session · powershell
           </span>
         </div>
-        <div ref={termContainer} className="flex-1 px-2 py-1" />
+        <div className="relative flex-1">
+          {((lazyConnect && !connectRequested && runtimeId == null) || wsStatus === "closed" || wsStatus === "error") && (
+            <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-[#0a0a0d]/90">
+              <p className="font-mono text-[10px] text-zinc-400">
+                {wsStatus === "error" ? "Terminal connection error" : wsStatus === "closed" ? "Terminal disconnected" : "PTY not connected"}
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  reconnectAttemptsRef.current = 0;
+                  setConnectRequested(false);
+                  queueMicrotask(() => {
+                    setConnectRequested(true);
+                  });
+                }}
+                className="rounded-md bg-indigo-600 px-3 py-1 font-mono text-[10px] text-white hover:bg-indigo-500"
+              >
+                {wsStatus === "error" || wsStatus === "closed" ? "Reconnect terminal" : "Connect terminal"}
+              </button>
+            </div>
+          )}
+          <div ref={termContainer} className="h-full px-2 py-1" />
+        </div>
 
         {askOpen && (
           <div className="border-t border-indigo-500/20 bg-indigo-500/[0.08] px-2 py-1.5">
             <div className="mb-1 flex items-center gap-1.5">
               <Sparkles className="h-3 w-3 text-indigo-300" />
               <span className="font-mono text-[9px] uppercase tracking-wider text-indigo-300">
-                Ask BOB · {model}
+                Ask orchestrator · {model}
               </span>
             </div>
             <div className="flex items-center gap-1">

@@ -1,26 +1,31 @@
-import { useState } from "react";
+import { forwardRef, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { ChevronDown, Filter } from "lucide-react";
 import { OrchestratorGraph } from "./OrchestratorGraph";
 import { TerminalCard, type CliRuntime } from "./TerminalCard";
 import { ContextDropzone, type CtxFile } from "./ContextDropzone";
 import { AnalyticsStrip } from "./AnalyticsStrip";
+import { AgentsToolsPanel } from "./AgentsToolsPanel";
+import { ArtifactsPanel } from "./ArtifactsPanel";
+import { RuntimeLogPanel } from "./RuntimeLogPanel";
 
 type Tab = "all" | "executing" | "idle" | "limited" | "permission";
 
-export function ProcessesView({
-  clis,
-  files: filesProp,
-  setFiles: setFilesProp,
-  onResyncShared,
-  onRuntime,
-}: {
-  clis: CliRuntime[];
-  files?: CtxFile[];
-  setFiles?: React.Dispatch<React.SetStateAction<CtxFile[]>>;
-  onResyncShared?: () => void;
-  onRuntime?: (providerId: number | undefined, runtimeId: number | undefined) => void;
-}) {
+export const ProcessesView = forwardRef<
+  HTMLDivElement,
+  {
+    clis: CliRuntime[];
+    parallelism?: number;
+    highlightAgentId?: string | null;
+    files?: CtxFile[];
+    setFiles?: React.Dispatch<React.SetStateAction<CtxFile[]>>;
+    onResyncShared?: () => void;
+    onRuntime?: (providerId: number | undefined, runtimeId: number | undefined) => void;
+  }
+>(function ProcessesView(
+  { clis, parallelism = 4, highlightAgentId = null, files: filesProp, setFiles: setFilesProp, onResyncShared, onRuntime },
+  ref,
+) {
   const [localFiles, setLocalFiles] = useState<CtxFile[]>([]);
   const files = filesProp ?? localFiles;
   const setFiles = setFilesProp ?? setLocalFiles;
@@ -29,20 +34,23 @@ export function ProcessesView({
   const [orchOpen, setOrchOpen] = useState(true);
   const [termsOpen, setTermsOpen] = useState(true);
   const [ctxOpen, setCtxOpen] = useState(true);
+  const [agentsOpen, setAgentsOpen] = useState(false);
+  const [artifactsOpen, setArtifactsOpen] = useState(false);
+  const [logsOpen, setLogsOpen] = useState(false);
 
   const filtered = clis.filter((c) => (tab === "all" ? true : c.state === tab));
   const totalUsed = clis.reduce((s, c) => s + c.used, 0);
   const totalCap = clis.reduce((s, c) => s + c.cap, 0);
-  const active = clis.filter((c) => c.runtimeId != null).length;
+  const activeRuntimes = clis.filter((c) => c.runtimeId != null).length;
 
   return (
-    <div className="h-full min-h-0 overflow-y-auto pb-44 sm:pb-48">
+    <div ref={ref} className="h-full min-h-0 overflow-y-auto pb-44 sm:pb-48">
       <div className="mx-auto max-w-[1400px] space-y-3 p-3 sm:p-5">
-        <AnalyticsStrip totalUsed={totalUsed} totalCap={totalCap} activeAgents={active} />
+        <AnalyticsStrip totalUsed={totalUsed} totalCap={totalCap} activeAgents={activeRuntimes} />
 
         <Section
           title="Orchestrator"
-          sub="ibm-cloud · custom agent · live routing graph + log"
+          sub="orchestrator · live routing graph + log"
           open={orchOpen}
           onToggle={() => setOrchOpen((o) => !o)}
         >
@@ -53,7 +61,7 @@ export function ProcessesView({
 
         <Section
           title="Parallel Terminals"
-          sub={`${clis.length} agents · ${active} executing`}
+          sub={`${clis.length} agents · ${activeRuntimes} live · cap ${parallelism}`}
           open={termsOpen}
           onToggle={() => setTermsOpen((o) => !o)}
           right={
@@ -88,7 +96,14 @@ export function ProcessesView({
         >
           <div className="grid gap-3 md:grid-cols-2">
             {filtered.map((c) => (
-              <TerminalCard key={c.id} cli={c} onRuntime={onRuntime} />
+              <TerminalCard
+                key={c.id}
+                cli={c}
+                onRuntime={onRuntime}
+                lazyConnect
+                spawnAllowed={activeRuntimes < parallelism || c.runtimeId != null}
+                highlighted={highlightAgentId === c.id.toLowerCase()}
+              />
             ))}
             {filtered.length === 0 && (
               <div className="col-span-full rounded-xl border border-dashed border-zinc-300/70 bg-zinc-50/50 px-6 py-10 text-center text-[12px] text-zinc-500 dark:border-white/10 dark:bg-white/[0.02]">
@@ -98,6 +113,33 @@ export function ProcessesView({
               </div>
             )}
           </div>
+        </Section>
+
+        <Section
+          title="Agents & MCP"
+          sub="A2A registry · MCP tool surface"
+          open={agentsOpen}
+          onToggle={() => setAgentsOpen((o) => !o)}
+        >
+          <AgentsToolsPanel />
+        </Section>
+
+        <Section
+          title="Session artifacts"
+          sub="outputs persisted under workspace/artifacts"
+          open={artifactsOpen}
+          onToggle={() => setArtifactsOpen((o) => !o)}
+        >
+          <ArtifactsPanel />
+        </Section>
+
+        <Section
+          title="Runtime logs"
+          sub="recent CLI runtime output (MED-051)"
+          open={logsOpen}
+          onToggle={() => setLogsOpen((o) => !o)}
+        >
+          <RuntimeLogPanel runtimeId={clis.find((c) => c.runtimeId)?.runtimeId} />
         </Section>
 
         <Section
@@ -118,7 +160,7 @@ export function ProcessesView({
       </div>
     </div>
   );
-}
+});
 
 function Section({
   title,

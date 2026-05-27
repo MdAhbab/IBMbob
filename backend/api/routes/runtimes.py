@@ -11,9 +11,7 @@ import aiosqlite
 import json
 
 
-def utc_now() -> datetime:
-    """Return current UTC datetime with timezone info."""
-    return datetime.now(timezone.utc)
+from backend.utils import utc_now
 
 from backend.database.models import (
     CLIRuntime, CLIRuntimeCreate, CLIRuntimeUpdate,
@@ -59,6 +57,7 @@ class ActiveRuntime(BaseModel):
     cwd: str
     pid: Optional[int]
     status: str
+    ws_url: Optional[str] = None
     started_at: Optional[datetime] = None
 
 
@@ -88,6 +87,8 @@ class ApprovalRequest(BaseModel):
 async def get_all_runtimes(
     status_filter: Optional[RuntimeStatus] = None,
     session_id: Optional[int] = None,
+    limit: int = 50,
+    offset: int = 0,
     db: aiosqlite.Connection = Depends(get_db),
     user_id: int = Depends(get_current_user_id)
 ) -> RuntimeListResponse:
@@ -97,6 +98,8 @@ async def get_all_runtimes(
     Args:
         status_filter: Filter by runtime status
         session_id: Filter by session ID
+        limit: Limit count
+        offset: Offset count
         db: Database connection
         user_id: Current user ID
         
@@ -105,8 +108,9 @@ async def get_all_runtimes(
     """
     # Build query with filters. PTY-backed runtimes may have session_id NULL,
     # so we LEFT JOIN sessions and accept rows where session_id is unset.
-    where_clauses = ["(s.user_id = ? OR r.session_id IS NULL)"]
-    params: List = [user_id]
+    # Single-user mode: unscoped PTY rows only visible to default user (HIGH-003)
+    where_clauses = ["(s.user_id = ? OR (r.session_id IS NULL AND ? = 1))"]
+    params: List = [user_id, user_id]
 
     if status_filter:
         where_clauses.append("r.status = ?")
@@ -116,14 +120,24 @@ async def get_all_runtimes(
         where_clauses.append("r.session_id = ?")
         params.append(session_id)
 
+    # Get total count
+    count_query = (
+        "SELECT COUNT(*) as count FROM cli_runtimes r "
+        "LEFT JOIN sessions s ON r.session_id = s.id "
+        "WHERE " + " AND ".join(where_clauses)
+    )
+    count_cursor = await db.execute(count_query, params)
+    total = (await count_cursor.fetchone())["count"]
+
     query = (
         "SELECT r.* FROM cli_runtimes r "
         "LEFT JOIN sessions s ON r.session_id = s.id "
         "WHERE " + " AND ".join(where_clauses) + " "
-        "ORDER BY r.started_at DESC"
+        "ORDER BY r.started_at DESC "
+        "LIMIT ? OFFSET ?"
     )
 
-    cursor = await db.execute(query, params)
+    cursor = await db.execute(query, params + [limit, offset])
     rows = await cursor.fetchall()
     
     runtimes = []
@@ -143,7 +157,7 @@ async def get_all_runtimes(
     
     return RuntimeListResponse(
         runtimes=runtimes,
-        total=len(runtimes)
+        total=total
     )
 
 
@@ -173,10 +187,13 @@ async def _resolve_pty_cwd(
     return str(Path(app_settings.upload_dir).resolve().parent)
 
 
-def _active_runtime_snapshots() -> ActiveRuntimesResponse:
+def _active_runtime_snapshots(limit: int = 50, offset: int = 0) -> ActiveRuntimesResponse:
     """Return only live PTY sessions in memory (cheap snapshot for the UI)."""
+    all_active = pty_manager.list_active()
+    total = len(all_active)
+    sliced = all_active[offset : offset + limit]
     items: List[ActiveRuntime] = []
-    for s in pty_manager.list_active():
+    for s in sliced:
         items.append(
             ActiveRuntime(
                 runtime_id=s.runtime_id,
@@ -185,24 +202,29 @@ def _active_runtime_snapshots() -> ActiveRuntimesResponse:
                 cwd=s.cwd,
                 pid=s.pid,
                 status=s.status,
+                ws_url=f"/ws/terminals/{s.runtime_id}?token={pty_manager.generate_ws_token(s.runtime_id)}",
             )
         )
-    return ActiveRuntimesResponse(runtimes=items, total=len(items))
+    return ActiveRuntimesResponse(runtimes=items, total=total)
 
 
 @router.get("/active", response_model=ActiveRuntimesResponse)
 async def list_active_runtimes(
+    limit: int = 50,
+    offset: int = 0,
     user_id: int = Depends(get_current_user_id),
 ) -> ActiveRuntimesResponse:
-    return _active_runtime_snapshots()
+    return _active_runtime_snapshots(limit, offset)
 
 
 @router.get("/live", response_model=ActiveRuntimesResponse)
 async def list_live_runtimes(
+    limit: int = 50,
+    offset: int = 0,
     user_id: int = Depends(get_current_user_id),
 ) -> ActiveRuntimesResponse:
     """Alias for /active — avoids Starlette matching `active` as a path param."""
-    return _active_runtime_snapshots()
+    return _active_runtime_snapshots(limit, offset)
 
 
 @router.post("/spawn", response_model=SpawnResponse, status_code=status.HTTP_201_CREATED)
@@ -222,13 +244,13 @@ async def spawn_runtime(
         )
 
     if spawn.provider_id is not None:
-        existing = pty_manager.active_for_provider(spawn.provider_id)
+        existing = pty_manager.active_for_provider(spawn.provider_id, user_id)
         if existing is not None:
             return SpawnResponse(
                 runtime_id=existing.runtime_id,
                 provider_id=existing.provider_id,
                 provider_name=existing.provider_name,
-                ws_url=f"/ws/terminals/{existing.runtime_id}",
+                ws_url=f"/ws/terminals/{existing.runtime_id}?token={pty_manager.generate_ws_token(existing.runtime_id)}",
                 cwd=existing.cwd,
                 pid=existing.pid,
                 status=existing.status,
@@ -273,6 +295,7 @@ async def spawn_runtime(
             provider_id=spawn.provider_id,
             provider_name=provider_name or "Terminal",
             cwd=cwd,
+            user_id=user_id,
         )
         if spawn.cols and spawn.rows:
             session.resize(spawn.cols, spawn.rows)
@@ -295,17 +318,19 @@ async def spawn_runtime(
         runtime_id=int(runtime_id),
         provider_id=session.provider_id,
         provider_name=session.provider_name,
-        ws_url=f"/ws/terminals/{runtime_id}",
+        ws_url=f"/ws/terminals/{runtime_id}?token={pty_manager.generate_ws_token(int(runtime_id))}",
         cwd=session.cwd,
         pid=session.pid,
         status=session.status,
     )
 
 
-@router.get("/{runtime_id}", response_model=RuntimeDetailResponse)
+@router.get("/{runtime_id:int}", response_model=RuntimeDetailResponse)
 async def get_runtime(
     runtime_id: int = Depends(verify_runtime_exists),
     include_logs: bool = True,
+    log_limit: int = 100,
+    log_offset: int = 0,
     db: aiosqlite.Connection = Depends(get_db),
     user_id: int = Depends(get_current_user_id)
 ) -> RuntimeDetailResponse:
@@ -315,6 +340,8 @@ async def get_runtime(
     Args:
         runtime_id: Runtime ID
         include_logs: Whether to include logs
+        log_limit: Max number of log entries to retrieve
+        log_offset: Pagination offset
         db: Database connection
         user_id: Current user ID
         
@@ -329,9 +356,9 @@ async def get_runtime(
         """
         SELECT r.* FROM cli_runtimes r
         LEFT JOIN sessions s ON r.session_id = s.id
-        WHERE r.id = ? AND (s.user_id = ? OR r.session_id IS NULL)
+        WHERE r.id = ? AND (s.user_id = ? OR (r.session_id IS NULL AND ? = 1))
         """,
-        (runtime_id, user_id)
+        (runtime_id, user_id, user_id)
     )
     row = await cursor.fetchone()
     
@@ -356,14 +383,17 @@ async def get_runtime(
     
     logs = []
     if include_logs:
-        # Get logs for this runtime
+        # Get logs for this runtime, defaulting to the latest log_limit entries sorted ASC chronologically (API-06)
         cursor = await db.execute(
             """
-            SELECT * FROM cli_logs
-            WHERE runtime_id = ?
-            ORDER BY timestamp ASC
+            SELECT * FROM (
+                SELECT * FROM cli_logs
+                WHERE runtime_id = ?
+                ORDER BY timestamp DESC
+                LIMIT ? OFFSET ?
+            ) ORDER BY timestamp ASC
             """,
-            (runtime_id,)
+            (runtime_id, log_limit, log_offset)
         )
         log_rows = await cursor.fetchall()
         
@@ -383,7 +413,7 @@ async def get_runtime(
     )
 
 
-@router.post("/{runtime_id}/approve", response_model=CLIRuntime)
+@router.post("/{runtime_id:int}/approve", response_model=CLIRuntime)
 async def approve_pending_command(
     approval: ApprovalRequest,
     runtime_id: int = Depends(verify_runtime_exists),
@@ -410,9 +440,9 @@ async def approve_pending_command(
         """
         SELECT r.* FROM cli_runtimes r
         LEFT JOIN sessions s ON r.session_id = s.id
-        WHERE r.id = ? AND (s.user_id = ? OR r.session_id IS NULL)
+        WHERE r.id = ? AND (s.user_id = ? OR (r.session_id IS NULL AND ? = 1))
         """,
-        (runtime_id, user_id)
+        (runtime_id, user_id, user_id)
     )
     row = await cursor.fetchone()
     
@@ -422,9 +452,9 @@ async def approve_pending_command(
             detail=f"Runtime with id {runtime_id} not found"
         )
     
-    # Check if runtime is in a state that can be approved
+    # Check if runtime is in a state that can be approved (BIZ-04)
     current_status = RuntimeStatus(row["status"])
-    if current_status != RuntimeStatus.RUNNING:
+    if current_status != RuntimeStatus.PENDING:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Runtime is not in pending state (current: {current_status.value})"
@@ -434,6 +464,21 @@ async def approve_pending_command(
     now = utc_now()
     
     if approval.approved:
+        # BIZ-05: Signal PTY session to resume by writing newline
+        session = pty_manager.get(runtime_id)
+        if session:
+            session.write("\n")
+
+        # Update DB status back to RUNNING
+        await db.execute(
+            """
+            UPDATE cli_runtimes
+            SET status = ?
+            WHERE id = ?
+            """,
+            (RuntimeStatus.RUNNING.value, runtime_id)
+        )
+
         # Log approval
         await db.execute(
             """
@@ -447,7 +492,6 @@ async def approve_pending_command(
                 now.isoformat()
             )
         )
-        # In a real implementation, this would signal the process to continue
     else:
         # Reject and kill the process
         await db.execute(
@@ -464,6 +508,9 @@ async def approve_pending_command(
             )
         )
         
+        # Kill and remove PTY session (BIZ-06)
+        pty_manager.remove(runtime_id)
+
         # Log rejection
         await db.execute(
             """
@@ -566,7 +613,7 @@ async def create_runtime(
     )
 
 
-@router.put("/{runtime_id}", response_model=CLIRuntime)
+@router.put("/{runtime_id:int}", response_model=CLIRuntime)
 async def update_runtime(
     runtime_update: CLIRuntimeUpdate,
     runtime_id: int = Depends(verify_runtime_exists),
@@ -590,9 +637,9 @@ async def update_runtime(
         """
         SELECT r.id FROM cli_runtimes r
         LEFT JOIN sessions s ON r.session_id = s.id
-        WHERE r.id = ? AND (s.user_id = ? OR r.session_id IS NULL)
+        WHERE r.id = ? AND (s.user_id = ? OR (r.session_id IS NULL AND ? = 1))
         """,
-        (runtime_id, user_id)
+        (runtime_id, user_id, user_id)
     )
     if await cursor.fetchone() is None:
         raise HTTPException(
@@ -631,7 +678,7 @@ async def update_runtime(
     return await get_runtime(runtime_id, False, db, user_id)
 
 
-@router.delete("/{runtime_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{runtime_id:int}", status_code=status.HTTP_204_NO_CONTENT)
 async def kill_runtime(
     runtime_id: int = Depends(verify_runtime_exists),
     db: aiosqlite.Connection = Depends(get_db),
@@ -647,7 +694,7 @@ async def kill_runtime(
     return None
 
 
-@router.post("/{runtime_id}/pause", response_model=CLIRuntime)
+@router.post("/{runtime_id:int}/pause", response_model=CLIRuntime)
 async def pause_runtime(
     runtime_id: int = Depends(verify_runtime_exists),
     db: aiosqlite.Connection = Depends(get_db),
@@ -665,7 +712,7 @@ async def pause_runtime(
     return await get_runtime(runtime_id, False, db, user_id)
 
 
-@router.post("/{runtime_id}/resume", response_model=CLIRuntime)
+@router.post("/{runtime_id:int}/resume", response_model=CLIRuntime)
 async def resume_runtime(
     runtime_id: int = Depends(verify_runtime_exists),
     db: aiosqlite.Connection = Depends(get_db),
@@ -682,4 +729,3 @@ async def resume_runtime(
     await db.commit()
     return await get_runtime(runtime_id, False, db, user_id)
 
-# Made with Bob

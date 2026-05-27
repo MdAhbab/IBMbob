@@ -35,14 +35,8 @@ import {
 import { useStore, type AuthMethod, type Provider } from "./store";
 import { useTheme } from "./theme";
 import { OrchestratorLogo } from "./OrchestratorLogo";
-import { apiFetch, isAbortError } from "../lib/api";
+import { apiFetch, apiPath, isAbortError } from "../lib/api";
 import { CliInstallHint } from "./CliInstallHint";
-
-const RECENT_FOLDERS = [
-  "~/projects/acme-monorepo",
-  "~/projects/orchestra-cli",
-  "~/work/sandbox",
-];
 
 type CliCfg = {
   method: AuthMethod;
@@ -60,6 +54,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   const { theme, toggle } = useTheme();
   const [step, setStep] = useState(0);
   const [folderPath, setFolderPath] = useState("");
+  const [recentFolders, setRecentFolders] = useState<string[]>([]);
   const [selected, setSelected] = useState<string[]>(
     providers.filter((p) => p.enabled).map((p) => p.id)
   );
@@ -68,6 +63,18 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   const [cliCfg, setCliCfg] = useState<Record<string, CliCfg>>({});
   const [saving, setSaving] = useState(false);
   const [finishError, setFinishError] = useState<string | null>(null);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("orch.recent_workspaces");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          setRecentFolders(parsed);
+        }
+      }
+    } catch {}
+  }, []);
 
   const cliList = useMemo(
     () => providers.filter((p) => selected.includes(p.id)),
@@ -125,35 +132,6 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
     const workspacePath = resolveWorkspacePath();
     const workspaceName =
       workspacePath.split(/[/\\]/).filter(Boolean).pop() || "workspace";
-
-    // Optimistically update the in-memory store so the next view renders fast.
-    setWorkspace({ path: workspacePath, name: workspaceName });
-    setProviders((prev) =>
-      prev.map((p) => {
-        if (!selected.includes(p.id)) return { ...p, enabled: false };
-        const c = cliCfg[p.id];
-        if (!c) return { ...p, enabled: true };
-        const effectiveEmail =
-          c.method === "account"
-            ? c.override
-              ? c.email.trim()
-              : sharedEmail.trim()
-            : undefined;
-        return {
-          ...p,
-          enabled: true,
-          configured: true,
-          authMethod: c.method,
-          endpoint: c.method === "ssh" ? c.endpoint : p.endpoint,
-          model: c.model,
-          accountEmail: effectiveEmail,
-          accountPlan:
-            c.method === "account"
-              ? `${p.accountProvider || p.name} plan`
-              : undefined,
-        };
-      })
-    );
 
     // Persist to the backend (encrypted credentials, enabled flags, prefs).
     try {
@@ -220,6 +198,42 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
         );
         return;
       }
+
+      setWorkspace({ path: workspacePath, name: workspaceName });
+      setProviders((prev) =>
+        prev.map((p) => {
+          if (!selected.includes(p.id)) return { ...p, enabled: false };
+          const c = cliCfg[p.id];
+          if (!c) return { ...p, enabled: true };
+          const effectiveEmail =
+            c.method === "account"
+              ? c.override
+                ? c.email.trim()
+                : sharedEmail.trim()
+              : undefined;
+          return {
+            ...p,
+            enabled: true,
+            configured: true,
+            authMethod: c.method,
+            endpoint: c.method === "ssh" ? c.endpoint : p.endpoint,
+            model: c.model,
+            accountEmail: effectiveEmail,
+            accountPlan:
+              c.method === "account"
+                ? `${p.accountProvider || p.name} plan`
+                : undefined,
+          };
+        })
+      );
+      try {
+        const raw = localStorage.getItem("orch.recent_workspaces");
+        const list = raw ? JSON.parse(raw) : [];
+        const nextList = [workspacePath, ...list.filter((x: string) => x !== workspacePath)].slice(0, 5);
+        localStorage.setItem("orch.recent_workspaces", JSON.stringify(nextList));
+      } catch {}
+      setOnboarded(true);
+      onDone();
     } catch (err) {
       console.error("onboarding persist failed:", err);
       setFinishError(
@@ -231,9 +245,6 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
     } finally {
       setSaving(false);
     }
-
-    setOnboarded(true);
-    onDone();
   };
 
   return (
@@ -268,8 +279,12 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
               {theme === "dark" ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
             </button>
             <button
-              onClick={finish}
-              className="rounded-lg border border-zinc-200/70 bg-white px-3 py-1.5 text-[11px] text-zinc-600 hover:bg-zinc-50 dark:border-white/[0.07] dark:bg-white/[0.02] dark:text-zinc-300"
+              onClick={() => {
+                setOnboarded(true);
+                onDone();
+              }}
+              disabled={saving}
+              className="rounded-lg border border-zinc-200/70 bg-white px-3 py-1.5 text-[11px] text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 dark:border-white/[0.07] dark:bg-white/[0.02] dark:text-zinc-300"
             >
               Skip setup
             </button>
@@ -309,6 +324,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
                   folderPath={folderPath}
                   setFolderPath={setFolderPath}
                   pickFolder={pickFolder}
+                  recentFolders={recentFolders}
                   onBack={() => setStep(0)}
                   onNext={() => setStep(2)}
                 />
@@ -441,15 +457,55 @@ function StepWorkspace({
   folderPath,
   setFolderPath,
   pickFolder,
+  recentFolders,
   onBack,
   onNext,
 }: {
   folderPath: string;
   setFolderPath: (v: string) => void;
   pickFolder: () => void;
+  recentFolders: string[];
   onBack: () => void;
   onNext: () => void;
 }) {
+  const [isValidating, setIsValidating] = useState(false);
+  const [pathValid, setPathValid] = useState<boolean | null>(null);
+  const [validationError, setValidationError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const trimmed = folderPath.trim();
+    if (!trimmed) {
+      setPathValid(null);
+      setValidationError(null);
+      return;
+    }
+
+    setIsValidating(true);
+    const delayDebounceFn = setTimeout(async () => {
+      try {
+        const res = await apiFetch(
+          `/workspace/validate-path?path=${encodeURIComponent(trimmed)}`,
+          { timeoutMs: 10_000 },
+        );
+        if (res.ok) {
+          const data = await res.json();
+          setPathValid(!!data.valid);
+          setValidationError(data.error || null);
+        } else {
+          setPathValid(false);
+          setValidationError("Failed to communicate with validation service.");
+        }
+      } catch (err) {
+        setPathValid(false);
+        setValidationError("Validation service offline.");
+      } finally {
+        setIsValidating(false);
+      }
+    }, 500);
+
+    return () => clearTimeout(delayDebounceFn);
+  }, [folderPath]);
+
   return (
     <div className="px-8 py-10">
       <div className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.22em] text-indigo-500">
@@ -459,7 +515,7 @@ function StepWorkspace({
         Where should orchestra live?
       </h2>
       <p className="mt-2 max-w-lg text-[13px] leading-relaxed text-zinc-500">
-        Pick the project folder. Orchestra reads <span className="font-mono">skill.md</span>,
+        Pick the project folder. Orchestrator reads <span className="font-mono">skill.md</span>,
         <span className="font-mono"> plan.md</span>, and writes
         <span className="font-mono"> divisions.md</span> here so every CLI shares the same
         context.
@@ -480,29 +536,35 @@ function StepWorkspace({
             {folderPath ? "ready" : "click to open native picker"}
           </div>
         </div>
-        {folderPath && <CheckCircle2 className="h-4 w-4 text-emerald-500" />}
+        {folderPath && pathValid === true && <CheckCircle2 className="h-4 w-4 text-emerald-500" />}
       </button>
 
       <div className="mt-4">
         <div className="font-mono text-[10px] uppercase tracking-[0.2em] text-zinc-500">
           Recent
         </div>
-        <div className="mt-2 space-y-1.5">
-          {RECENT_FOLDERS.map((p) => (
-            <button
-              key={p}
-              onClick={() => setFolderPath(p)}
-              className={`flex w-full items-center justify-between rounded-lg border px-3 py-2 text-left transition ${
-                folderPath === p
-                  ? "border-indigo-300 bg-indigo-50 dark:border-indigo-400/30 dark:bg-indigo-400/[0.08]"
-                  : "border-zinc-200/70 bg-white hover:bg-zinc-50 dark:border-white/[0.06] dark:bg-white/[0.015] dark:hover:bg-white/[0.04]"
-              }`}
-            >
-              <span className="font-mono text-[11.5px] text-zinc-700 dark:text-zinc-200">{p}</span>
-              {folderPath === p && <Check className="h-3.5 w-3.5 text-indigo-500" />}
-            </button>
-          ))}
-        </div>
+        {recentFolders.length > 0 ? (
+          <div className="mt-2 space-y-1.5">
+            {recentFolders.map((p) => (
+              <button
+                key={p}
+                onClick={() => setFolderPath(p)}
+                className={`flex w-full items-center justify-between rounded-lg border px-3 py-2 text-left transition ${
+                  folderPath === p
+                    ? "border-indigo-300 bg-indigo-50 dark:border-indigo-400/30 dark:bg-indigo-400/[0.08]"
+                    : "border-zinc-200/70 bg-white hover:bg-zinc-50 dark:border-white/[0.06] dark:bg-white/[0.015] dark:hover:bg-white/[0.04]"
+                }`}
+              >
+                <span className="font-mono text-[11.5px] text-zinc-700 dark:text-zinc-200">{p}</span>
+                {folderPath === p && <Check className="h-3.5 w-3.5 text-indigo-500" />}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="mt-1.5 rounded-lg border border-dashed border-zinc-200 p-3 text-center text-[11px] text-zinc-400 dark:border-white/10 dark:text-zinc-500">
+            No recent workspaces yet. Choose a folder or type a path to get started.
+          </div>
+        )}
       </div>
 
       <div className="mt-4">
@@ -515,13 +577,24 @@ function StepWorkspace({
           placeholder="~/projects/your-app"
           className="mt-1.5 w-full rounded-lg border border-zinc-200/70 bg-white px-3 py-2 font-mono text-[12px] text-zinc-800 outline-none focus:border-indigo-400 dark:border-white/[0.06] dark:bg-white/[0.02] dark:text-zinc-200"
         />
+        {isValidating && (
+          <p className="mt-1 font-mono text-[10px] text-indigo-500 animate-pulse">Validating workspace path...</p>
+        )}
+        {!isValidating && pathValid === true && (
+          <p className="mt-1 font-mono text-[10px] text-emerald-500">✓ Valid workspace folder path</p>
+        )}
+        {!isValidating && pathValid === false && (
+          <p className="mt-1 font-mono text-[10px] text-rose-500">
+            ✗ Invalid path: {validationError || "Directory parent does not exist or path format is incorrect."}
+          </p>
+        )}
       </div>
 
       <div className="mt-8 flex justify-between">
         <GhostBtn onClick={onBack}>
           <ArrowLeft className="h-3.5 w-3.5" /> Back
         </GhostBtn>
-        <PrimaryBtn onClick={onNext} disabled={!folderPath.trim()}>
+        <PrimaryBtn onClick={onNext} disabled={!folderPath.trim() || pathValid === false || isValidating}>
           Continue <ArrowRight className="h-3.5 w-3.5" />
         </PrimaryBtn>
       </div>

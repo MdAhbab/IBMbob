@@ -10,9 +10,7 @@ import aiosqlite
 import json
 
 
-def utc_now() -> datetime:
-    """Return current UTC datetime with timezone info."""
-    return datetime.now(timezone.utc)
+from backend.utils import utc_now
 
 from backend.database.models import (
     Session, SessionCreate, SessionUpdate, SessionStatus,
@@ -188,6 +186,37 @@ async def list_sessions(
     )
 
 
+async def _get_session_by_id(
+    session_id: int,
+    db: aiosqlite.Connection,
+    user_id: int
+) -> Session:
+    """Helper to fetch a session and verify ownership."""
+    cursor = await db.execute(
+        "SELECT * FROM sessions WHERE id = ? AND user_id = ?",
+        (session_id, user_id)
+    )
+    row = await cursor.fetchone()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session with id {session_id} not found"
+        )
+    return Session(
+        id=row["id"],
+        user_id=row["user_id"],
+        workspace_id=row["workspace_id"],
+        title=row["title"],
+        description=row["description"],
+        status=SessionStatus(row["status"]),
+        session_type=SessionType(row["session_type"]),
+        metadata=json.loads(row["metadata"]) if row["metadata"] else None,
+        created_at=datetime.fromisoformat(row["created_at"]),
+        updated_at=datetime.fromisoformat(row["updated_at"]),
+        completed_at=datetime.fromisoformat(row["completed_at"]) if row["completed_at"] else None
+    )
+
+
 @router.get("/{session_id}", response_model=Session)
 async def get_session(
     session_id: int,
@@ -208,31 +237,7 @@ async def get_session(
     Raises:
         HTTPException: If session not found or access denied
     """
-    cursor = await db.execute(
-        "SELECT * FROM sessions WHERE id = ? AND user_id = ?",
-        (session_id, user_id)
-    )
-    row = await cursor.fetchone()
-    
-    if row is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session with id {session_id} not found"
-        )
-    
-    return Session(
-        id=row["id"],
-        user_id=row["user_id"],
-        workspace_id=row["workspace_id"],
-        title=row["title"],
-        description=row["description"],
-        status=SessionStatus(row["status"]),
-        session_type=SessionType(row["session_type"]),
-        metadata=json.loads(row["metadata"]) if row["metadata"] else None,
-        created_at=datetime.fromisoformat(row["created_at"]),
-        updated_at=datetime.fromisoformat(row["updated_at"]),
-        completed_at=datetime.fromisoformat(row["completed_at"]) if row["completed_at"] else None
-    )
+    return await _get_session_by_id(session_id, db, user_id)
 
 
 @router.get("/{session_id}/messages", response_model=MessageListResponse)
@@ -353,7 +358,7 @@ async def update_session(
     
     if not update_fields:
         # No fields to update, just return current session
-        return await get_session(session_id, db, user_id)
+        return await _get_session_by_id(session_id, db, user_id)
     
     # Add updated_at
     update_fields.append("updated_at = ?")
@@ -369,11 +374,12 @@ async def update_session(
     await db.commit()
     
     # Return updated session
-    return await get_session(session_id, db, user_id)
+    return await _get_session_by_id(session_id, db, user_id)
 
 
 @router.delete("", status_code=status.HTTP_204_NO_CONTENT)
 async def clear_all_sessions(
+    confirm: bool = Query(False, description="Confirm deletion of all sessions"),
     db: aiosqlite.Connection = Depends(get_db),
     user_id: int = Depends(get_current_user_id)
 ):
@@ -382,9 +388,26 @@ async def clear_all_sessions(
     This will cascade delete all related data (messages, artifacts, etc.).
     
     Args:
+        confirm: Confirmation flag
         db: Database connection
         user_id: Current user ID
     """
+    if not confirm:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Confirmation is required to clear all sessions (set ?confirm=true)"
+        )
+
+    # BIZ-06: Find and kill all active PTY runtimes for sessions belonging to this user
+    cursor = await db.execute(
+        "SELECT id FROM cli_runtimes WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ?)",
+        (user_id,)
+    )
+    runtimes = await cursor.fetchall()
+    from backend.services.pty_service import pty_manager
+    for r in runtimes:
+        pty_manager.remove(r["id"])
+
     await db.execute(
         "DELETE FROM sessions WHERE user_id = ?",
         (user_id,)
@@ -410,16 +433,30 @@ async def delete_session(
     Raises:
         HTTPException: If session not found or access denied
     """
+    # Verify session exists and belongs to user
     cursor = await db.execute(
-        "DELETE FROM sessions WHERE id = ? AND user_id = ?",
+        "SELECT id FROM sessions WHERE id = ? AND user_id = ?",
         (session_id, user_id)
     )
-    await db.commit()
-    
-    if cursor.rowcount == 0:
+    if await cursor.fetchone() is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session with id {session_id} not found"
         )
 
-# Made with Bob
+    # BIZ-06: Kill all active PTY runtimes for this specific session
+    cursor = await db.execute(
+        "SELECT id FROM cli_runtimes WHERE session_id = ?",
+        (session_id,)
+    )
+    runtimes = await cursor.fetchall()
+    from backend.services.pty_service import pty_manager
+    for r in runtimes:
+        pty_manager.remove(r["id"])
+
+    await db.execute(
+        "DELETE FROM sessions WHERE id = ? AND user_id = ?",
+        (session_id, user_id)
+    )
+    await db.commit()
+

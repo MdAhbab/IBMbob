@@ -32,7 +32,7 @@ export function Loader({ visible }: { visible: boolean }) {
             </motion.div>
             <div className="flex flex-col items-center gap-3">
               <div className="font-mono text-[11px] uppercase tracking-[0.32em] text-zinc-400">
-                Booting Orchestra
+                Booting Orchestrator
               </div>
               <div className="relative h-[2px] w-64 overflow-hidden rounded-full bg-white/[0.06]">
                 <motion.div

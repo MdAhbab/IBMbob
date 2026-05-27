@@ -12,6 +12,7 @@ import {
   Workflow,
   MessageSquare,
 } from "lucide-react";
+import { apiFetch, healthCheckUrl } from "../lib/api";
 import { useTheme } from "./theme";
 
 export type Cmd = {
@@ -27,10 +28,12 @@ export function CommandPalette({
   open,
   onClose,
   onView,
+  onNewChat,
 }: {
   open: boolean;
   onClose: () => void;
   onView: (v: "chat" | "processes" | "settings") => void;
+  onNewChat?: () => void | Promise<void>;
 }) {
   const { theme, toggle } = useTheme();
   const [q, setQ] = useState("");
@@ -39,14 +42,15 @@ export function CommandPalette({
   const items: Cmd[] = useMemo(
     () => [
       { id: "chat", label: "Open chat", group: "Navigate", icon: MessageSquare, run: () => onView("chat") },
+      { id: "new", label: "New chat", hint: "⌘⇧N", group: "Navigate", icon: MessageSquare, run: () => { void onNewChat?.(); onClose(); } },
       { id: "proc", label: "Open processes", hint: "⌘⇧P", group: "Navigate", icon: Workflow, run: () => onView("processes") },
       { id: "set", label: "Open settings", hint: "⌘,", group: "Navigate", icon: SettingsIcon, run: () => onView("settings") },
       { id: "theme", label: `Switch to ${theme === "dark" ? "light" : "dark"} theme`, group: "Appearance", icon: theme === "dark" ? Sun : Moon, run: () => toggle() },
-      { id: "providers", label: "Manage providers", group: "Setup", icon: Plug, run: () => onView("settings") },
+      { id: "health", label: "Check backend health", group: "Setup", icon: Plug, run: () => { void apiFetch(healthCheckUrl()).then((r) => alert(r.ok ? "Backend healthy" : `Backend error (${r.status})`)); onClose(); } },
       { id: "orch", label: "Orchestrator settings", group: "Setup", icon: Cpu, run: () => onView("settings") },
       { id: "ctx", label: "Workspace context", group: "Setup", icon: Layers, run: () => onView("processes") },
     ],
-    [theme, toggle, onView]
+    [theme, toggle, onView, onNewChat, onClose]
   );
 
   useEffect(() => {

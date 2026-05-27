@@ -18,15 +18,15 @@
       }
     },
     {
-      "name": "IBM BOB",
-      "slug": "ibm-bob",
-      "package": "@ibm/bob-cli",
-      "install_command": "npm install -g @ibm/bob-cli",
-      "verify_command": "bob --version",
-      "required": true,
+      "name": "Grok API",
+      "slug": "grok",
+      "package": "n/a",
+      "install_command": "Configure GROK_API_KEY in Settings",
+      "verify_command": "n/a",
+      "required": false,
       "priority": 2,
-      "description": "IBM's BOB AI coding assistant",
-      "specialties": ["backend", "enterprise", "general"],
+      "description": "xAI Grok — orchestrator LLM (API key, no local CLI)",
+      "specialties": ["planning", "routing", "orchestration"],
       "rate_limits": {
         "daily": 500,
         "hourly": 50

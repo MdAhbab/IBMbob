@@ -1,15 +1,17 @@
-"""
+﻿"""
 Orchestrator management API routes.
 Handles task dispatching and orchestrator configuration.
 """
 
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, AsyncIterator
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 from datetime import datetime, timezone
 from pydantic import BaseModel
 import aiosqlite
 import asyncio
 import json
+import re
 from pathlib import Path
 
 
@@ -24,10 +26,19 @@ from backend.database.models import (
     ChatRequest, ChatResponse, MessageRole, ContentType
 )
 from backend.api.dependencies import (
-    fetch_active_workspace_path, get_db, get_current_user_id
+    fetch_active_workspace_path,
+    get_db,
+    get_current_user_id,
+    verify_session_owned_by_user,
 )
+from backend.services.orchestrator.core import get_orchestrator_engine
+from backend.services.orchestrator.context import SharedContext
+from backend.services.orchestrator.aggregator import aggregate_agent_results
 
 router = APIRouter(prefix="/orchestrator", tags=["orchestrator"])
+logger = logging.getLogger(__name__)
+
+MAX_CHAT_MESSAGE_LEN = 32_000
 
 
 class DispatchRequest(BaseModel):
@@ -49,6 +60,198 @@ class DispatchResponse(BaseModel):
     estimated_cost: Optional[float] = None
 
 
+async def _load_session_history(
+    db: aiosqlite.Connection,
+    session_id: int,
+    limit: int = 20,
+) -> List[Dict[str, str]]:
+    """Load recent messages for LLM context (MED-001)."""
+    cur = await db.execute(
+        """
+        SELECT role, content FROM messages
+        WHERE session_id = ?
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (session_id, limit),
+    )
+    rows = await cur.fetchall()
+    return [{"role": str(r["role"]), "content": str(r["content"])} for r in reversed(rows)]
+
+
+async def _resolve_context_files(
+    db: aiosqlite.Connection,
+    user_id: int,
+    file_ids: Optional[List[str]],
+) -> List[str]:
+    """Resolve context file ids/paths for SharedContext (HIGH-041)."""
+    if not file_ids:
+        return []
+    workspace = await fetch_active_workspace_path(db, user_id)
+    if not workspace:
+        return []
+    shared = Path(workspace) / "shared"
+    resolved: List[str] = []
+    for fid in file_ids:
+        candidate = shared / fid
+        if candidate.is_file():
+            try:
+                resolved.append(candidate.read_text(encoding="utf-8")[:8000])
+            except Exception:
+                pass
+    return resolved
+
+
+async def _fetch_orchestrator_config_row(
+    db: aiosqlite.Connection,
+    user_id: int,
+) -> aiosqlite.Row:
+    cursor = await db.execute(
+        """
+        SELECT * FROM orchestrator_config
+        WHERE user_id = ? AND is_active = 1
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (user_id,),
+    )
+    config_row = await cursor.fetchone()
+    if config_row is None:
+        await reset_orchestrator_config(db, user_id)
+        cursor = await db.execute(
+            """
+            SELECT * FROM orchestrator_config
+            WHERE user_id = ? AND is_active = 1
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (user_id,),
+        )
+        config_row = await cursor.fetchone()
+    if config_row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No active orchestrator configuration found",
+        )
+    return config_row
+
+
+async def _record_routing_history(
+    db: aiosqlite.Connection,
+    *,
+    session_id: int,
+    config_id: int,
+    selected_provider_id: int,
+    routing_strategy: str,
+    routing_reason: str,
+    tokens_used: Optional[int] = None,
+    cost_estimate: Optional[float] = None,
+) -> int:
+    now = utc_now()
+    cursor = await db.execute(
+        """
+        INSERT INTO routing_history (
+            session_id, orchestrator_config_id, selected_provider_id,
+            routing_strategy, routing_reason, tokens_used, cost_estimate, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            session_id,
+            config_id,
+            selected_provider_id,
+            routing_strategy,
+            routing_reason,
+            tokens_used,
+            cost_estimate,
+            now.isoformat(),
+        ),
+    )
+    await db.commit()
+    routing_id = cursor.lastrowid
+    if routing_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create routing history",
+        )
+    return int(routing_id)
+
+
+async def _resolve_provider_id_from_plan(
+    db: aiosqlite.Connection,
+    plan_provider_name: Optional[str],
+    config_row: aiosqlite.Row,
+) -> tuple[int, str]:
+    """Resolve SQLite provider id + display name from engine plan."""
+    if plan_provider_name:
+        cursor = await db.execute(
+            "SELECT id, display_name FROM providers WHERE name = ? LIMIT 1",
+            (plan_provider_name,),
+        )
+        row = await cursor.fetchone()
+        if row:
+            return int(row["id"]), str(row["display_name"] or plan_provider_name)
+
+    fallback_id = config_row["fallback_provider_id"] or config_row["default_provider_id"]
+    if fallback_id:
+        cursor = await db.execute(
+            "SELECT id, display_name FROM providers WHERE id = ?",
+            (fallback_id,),
+        )
+        row = await cursor.fetchone()
+        if row:
+            return int(row["id"]), str(row["display_name"])
+
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="No suitable provider available for routing history",
+    )
+
+
+async def _delegate_divisions_to_agents(
+    db: aiosqlite.Connection,
+    user_id: int,
+    session_id: int,
+    divisions: List[Dict[str, Any]],
+) -> List[str]:
+    """Assign tasks to CLI agents via A2A bus (HIGH-006)."""
+    from backend.services.agents.cli_agent import CLIAgentAdapter
+    from backend.services.agents.registry import AgentDescriptor, get_agent_registry
+
+    registry = get_agent_registry()
+    cur = await db.execute(
+        """
+        SELECT id, name, display_name FROM providers
+        WHERE is_enabled = 1 AND name NOT IN ('grok', 'gemini-api', 'deepseek-api',
+            'openai', 'anthropic', 'google', 'ollama', 'bob')
+        """
+    )
+    agents = {str(r["name"]): r for r in await cur.fetchall()}
+    delegated: List[str] = []
+    for div in divisions:
+        slug = str(div.get("short") or div.get("agent") or "").lower()
+        task = str(div.get("task") or "")
+        if not slug or not task:
+            continue
+        row = agents.get(slug)
+        if not row:
+            for name, r in agents.items():
+                if name in slug or slug in name:
+                    row = r
+                    break
+        if not row:
+            continue
+        desc = AgentDescriptor.from_provider_row(
+            name=str(row["name"]),
+            display_name=str(row["display_name"] or row["name"]),
+            provider_id=int(row["id"]),
+        )
+        registry.register(desc)
+        adapter = CLIAgentAdapter(desc)
+        await adapter.assign_task(task, session_id=session_id)
+        delegated.append(str(row["name"]))
+    return delegated
+
+
 @router.post("/dispatch", response_model=DispatchResponse)
 async def dispatch_task(
     request: DispatchRequest,
@@ -57,146 +260,87 @@ async def dispatch_task(
 ) -> DispatchResponse:
     """
     Dispatch a task to an appropriate provider based on routing strategy.
-    
-    Args:
-        request: Dispatch request with task details
-        db: Database connection
-        user_id: Current user ID
-        
-    Returns:
-        Dispatch response with selected provider and routing info
-        
-    Raises:
-        HTTPException: If no suitable provider found
+    Runs the orchestrator engine and delegates divisions to CLI agents.
     """
-    # Get user's orchestrator config
-    cursor = await db.execute(
-        """
-        SELECT * FROM orchestrator_config
-        WHERE user_id = ? AND is_active = 1
-        ORDER BY created_at DESC
-        LIMIT 1
-        """,
-        (user_id,)
-    )
-    config_row = await cursor.fetchone()
-    
-    if config_row is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No active orchestrator configuration found"
+    session_id = request.session_id
+    if session_id is None:
+        now = utc_now().isoformat()
+        cursor = await db.execute(
+            """
+            INSERT INTO sessions (
+                user_id, title, status, session_type, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, request.task[:100], "active", "dispatch", now, now),
         )
-    
-    # Determine routing strategy
+        await db.commit()
+        session_id = cursor.lastrowid
+    else:
+        await verify_session_owned_by_user(int(session_id), user_id, db)
+
+    workspace = await fetch_active_workspace_path(db, user_id)
+    ctx = SharedContext(
+        session_id=int(session_id),
+        workspace_path=workspace,
+        user_message=request.task,
+    )
+    history = await _load_session_history(db, int(session_id))
+    for msg in history:
+        ctx.append_history(msg["role"], msg["content"])
+
+    config_row = await _fetch_orchestrator_config_row(db, user_id)
     routing_strategy = request.routing_strategy or RoutingStrategy(config_row["routing_strategy"])
-    
-    # Select provider based on strategy
-    selected_provider_id = None
-    routing_reason = None
-    
-    if request.provider_id:
-        # Manual provider selection
-        selected_provider_id = request.provider_id
-        routing_reason = "Manual provider selection"
-    elif routing_strategy == RoutingStrategy.AUTO:
-        # Use default provider from config
-        selected_provider_id = config_row["default_provider_id"]
-        routing_reason = "Auto-routing to default provider"
-    elif routing_strategy == RoutingStrategy.LEAST_COST:
-        # Select cheapest provider (simplified logic)
-        cursor = await db.execute(
-            """
-            SELECT p.id FROM providers p
-            JOIN provider_credentials pc ON p.id = pc.provider_id
-            WHERE pc.user_id = ? AND p.is_enabled = 1 AND pc.is_active = 1
-            ORDER BY p.id
-            LIMIT 1
-            """,
-            (user_id,)
-        )
-        provider_row = await cursor.fetchone()
-        if provider_row:
-            selected_provider_id = provider_row["id"]
-            routing_reason = "Least cost routing"
-    elif routing_strategy == RoutingStrategy.FASTEST:
-        # Select fastest provider (simplified logic)
-        selected_provider_id = config_row["default_provider_id"]
-        routing_reason = "Fastest provider routing"
-    elif routing_strategy == RoutingStrategy.ROUND_ROBIN:
-        # Round-robin selection (simplified)
-        cursor = await db.execute(
-            """
-            SELECT p.id FROM providers p
-            JOIN provider_credentials pc ON p.id = pc.provider_id
-            WHERE pc.user_id = ? AND p.is_enabled = 1 AND pc.is_active = 1
-            ORDER BY p.id
-            LIMIT 1
-            """,
-            (user_id,)
-        )
-        provider_row = await cursor.fetchone()
-        if provider_row:
-            selected_provider_id = provider_row["id"]
-            routing_reason = "Round-robin routing"
-    
-    if selected_provider_id is None:
-        # Fallback to default or raise error
-        if config_row["fallback_provider_id"]:
-            selected_provider_id = config_row["fallback_provider_id"]
-            routing_reason = "Fallback provider"
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="No suitable provider available"
-            )
-    
-    # Get provider details
-    cursor = await db.execute(
-        "SELECT name, display_name FROM providers WHERE id = ?",
-        (selected_provider_id,)
+
+    engine = get_orchestrator_engine()
+    plan = await engine.run(
+        db,
+        user_id,
+        ctx,
+        model=None,
+        routing_strategy=routing_strategy.value,
+        preferred_provider_db_id=request.provider_id,
     )
-    provider_row = await cursor.fetchone()
-    
-    if provider_row is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Provider {selected_provider_id} not found"
+    metadata = plan.to_metadata_dict()
+    if request.metadata:
+        metadata.update(request.metadata)
+    divisions = metadata.get("divisions") or []
+    delegated: List[str] = []
+    if divisions:
+        delegated = await _delegate_divisions_to_agents(
+            db, user_id, int(session_id), divisions
         )
-    
-    # Create routing history entry
-    now = utc_now()
-    cursor = await db.execute(
-        """
-        INSERT INTO routing_history (
-            session_id, orchestrator_config_id, selected_provider_id,
-            routing_strategy, routing_reason, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (
-            request.session_id,
-            config_row["id"],
-            selected_provider_id,
-            routing_strategy.value,
-            routing_reason,
-            now.isoformat()
-        )
+        metadata["delegated_agents"] = delegated
+        aggregate_agent_results(plan, {a: "task assigned" for a in delegated})
+
+    try:
+        await _write_divisions_artifact(db, user_id, request.task, metadata)
+    except Exception:
+        logger.exception("failed to write divisions.md on dispatch")
+
+    routing_meta = metadata.get("routing") or {}
+    routing_reason = str(routing_meta.get("reason") or "Orchestrator engine")
+    selected_provider_id, provider_display = await _resolve_provider_id_from_plan(
+        db, plan.provider_id, config_row
     )
-    await db.commit()
-    
-    routing_id = cursor.lastrowid
-    if routing_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to create routing history"
-        )
-    
+
+    routing_id = await _record_routing_history(
+        db,
+        session_id=int(session_id),
+        config_id=int(config_row["id"]),
+        selected_provider_id=selected_provider_id,
+        routing_strategy=routing_strategy.value,
+        routing_reason=routing_reason,
+        tokens_used=plan.tokens_used,
+        cost_estimate=plan.cost_estimate,
+    )
+
     return DispatchResponse(
         routing_id=routing_id,
         selected_provider_id=selected_provider_id,
-        provider_name=provider_row["display_name"],
+        provider_name=provider_display,
         routing_strategy=routing_strategy.value,
         routing_reason=routing_reason,
-        estimated_cost=None  # TODO: Implement cost estimation
+        estimated_cost=plan.cost_estimate,
     )
 
 
@@ -369,6 +513,12 @@ async def reset_orchestrator_config(
     Returns:
         Reset orchestrator configuration
     """
+    # Delete old default config if it exists to avoid UNIQUE constraint violation
+    await db.execute(
+        "DELETE FROM orchestrator_config WHERE user_id = ? AND config_name = ?",
+        (user_id, "Default Configuration")
+    )
+    
     # Deactivate current config
     await db.execute(
         "UPDATE orchestrator_config SET is_active = 0 WHERE user_id = ?",
@@ -404,274 +554,32 @@ async def reset_orchestrator_config(
     return await get_orchestrator_config(db, user_id)
 
 
-ORCHESTRATOR_SYSTEM_PROMPT = """You are BOB, an enterprise development orchestrator powered by IBM Granite on Watsonx.ai.
-You coordinate a fleet of coding CLI agents (Claude Code, Gemini CLI, Codex CLI, Copilot CLI, DeepSeek, Kimi, Cline, and BOB itself) that the user has enabled.
-
-For every user request you MUST respond with a SINGLE JSON object - and nothing else - matching this shape exactly:
-{
-  "content": "<short, friendly assistant reply (1-3 sentences). plain text only.>",
-  "thinking": ["<step 1>", "<step 2>", "..."],
-  "divisions": [
-    {"agent": "<provider display name>", "short": "<provider id>", "color": "#hex", "task": "<one-line task>", "status": "running|queued|done"}
-  ],
-  "artifacts": [
-    {"name": "<filename>", "kind": "md|ts|py|json|txt"}
-  ]
-}
-
-Rules:
-- Do NOT wrap the JSON in markdown fences.
-- Keep "thinking" to 3-5 short lines.
-- Use "divisions" only when the task should be split across agents; otherwise return [].
-- Use "artifacts" only when a file would actually be produced; otherwise return [].
-- Agents you may delegate to (use their `short` id): claude, gemini, codex, copilot, deepseek, kimi, cline, bob.
-"""
-
-
-AGENT_COLORS = {
-    "claude": "#f59e0b",
-    "gemini": "#6366f1",
-    "codex": "#10b981",
-    "copilot": "#71717a",
-    "deepseek": "#a855f7",
-    "kimi": "#f43f5e",
-    "cline": "#06b6d4",
-    "bob": "#3b82f6",
-}
-
-
-async def _enabled_provider_rows(
-    db: aiosqlite.Connection, user_id: int
-) -> List[Dict[str, str]]:
-    """Return enabled providers in the compact shape used by planners."""
-    try:
-        cur = await db.execute(
-            """
-            SELECT p.name, p.display_name, p.default_model
-            FROM providers p
-            WHERE p.is_enabled = 1
-            ORDER BY p.id
-            """
-        )
-        rows = await cur.fetchall()
-        return [
-            {
-                "name": str(r["name"]),
-                "display_name": str(r["display_name"] or r["name"]),
-                "default_model": str(r["default_model"] or ""),
-            }
-            for r in rows
-        ]
-    except Exception:
-        return []
-
-
-async def _enabled_providers_summary(db: aiosqlite.Connection, user_id: int) -> str:
-    """Build a short string listing the user's currently enabled providers."""
-    rows = await _enabled_provider_rows(db, user_id)
-    if not rows:
-        return "(no providers enabled)"
-    return ", ".join(
-        f"{r['display_name']} [{r['name']}] ({r['default_model']})" for r in rows
-    )
-
-
-def _strip_code_fences(text: str) -> str:
-    s = text.strip()
-    if s.startswith("```"):
-        s = s.split("\n", 1)[1] if "\n" in s else s
-        if s.endswith("```"):
-            s = s[: -len("```")]
-    return s.strip()
-
-
-def _plan_from_nlu_analysis(
-    message: str,
-    analysis: Dict[str, Any],
-    providers_summary: str,
-) -> Dict[str, Any]:
-    """Turn Watson NLU JSON into an orchestrator-style chat payload."""
-    sentiment = analysis.get("sentiment") or {}
-    doc_sent = sentiment.get("document") or {}
-    label = doc_sent.get("label") or "unknown"
-    score = doc_sent.get("score")
-    score_txt = f" ({score:.2f})" if isinstance(score, (int, float)) else ""
-
-    entities = analysis.get("entities") or []
-    keywords = analysis.get("keywords") or []
-    concepts = analysis.get("concepts") or []
-
-    ent_bits = [
-        f"{e.get('text', '')} ({e.get('type', 'entity')})"
-        for e in entities[:6]
-        if e.get("text")
-    ]
-    kw_bits = [k.get("text", "") for k in keywords[:6] if k.get("text")]
-    concept_bits = [c.get("text", "") for c in concepts[:5] if c.get("text")]
-
-    summary_parts = [
-        f"I analyzed your message with Watson NLU (sentiment: {label}{score_txt})."
-    ]
-    if ent_bits:
-        summary_parts.append(f"Entities: {', '.join(ent_bits)}.")
-    if kw_bits:
-        summary_parts.append(f"Keywords: {', '.join(kw_bits)}.")
-    if concept_bits:
-        summary_parts.append(f"Concepts: {', '.join(concept_bits)}.")
-    summary_parts.append(
-        "NLU understands language structure — for full task planning, enable Watsonx Granite "
-        "or describe the next concrete step you want agents to run."
-    )
-
-    thinking = [
-        "Watson NLU analyze() completed.",
-        f"Sentiment: {label}{score_txt}",
-        f"Enabled agents: {providers_summary}",
-    ]
-    if ent_bits:
-        thinking.append(f"Entities: {', '.join(ent_bits[:4])}")
-    if kw_bits:
-        thinking.append(f"Keywords: {', '.join(kw_bits[:4])}")
-
-    return {
-        "content": " ".join(summary_parts),
-        "thinking": thinking,
-        "divisions": [],
-        "artifacts": [{"name": "nlu-analysis.json", "kind": "json"}],
-        "model": "watson-nlu",
-        "nlu": {
-            "sentiment": doc_sent,
-            "entities": entities[:12],
-            "keywords": keywords[:12],
-            "concepts": concepts[:8],
-        },
-    }
-
-
-def _legacy_offline_chat_plan(message: str, providers_summary: str) -> Dict[str, Any]:
-    """Deterministic fallback when Watsonx is not configured (still useful for local dev)."""
-    preview = message.strip()[:240]
-    return {
-        "content": (
-            "I'm running in offline orchestrator mode (Watsonx not configured). "
-            "Add WATSONX_API_KEY and WATSONX_PROJECT_ID to backend/.env, then restart "
-            "`python run.py` for full Granite responses."
-        ),
-        "thinking": [
-            "Parsed the user request locally.",
-            f"Enabled agents: {providers_summary}",
-            "Watsonx call skipped — credentials or SDK missing.",
-        ],
-        "divisions": [],
-        "artifacts": [{"name": "task-notes.md", "kind": "md"}],
-    }
-
-
-def _task_for_provider(provider_name: str, message: str) -> str:
-    """Create an actionable, provider-specific one-line assignment."""
-    short = provider_name.lower()
-    preview = " ".join(message.strip().split())[:180] or "the requested change"
-    lower = preview.lower()
-
-    if "landing page" in lower:
-        landing = {
-            "gemini": "Design the landing page structure, visual hierarchy, responsive sections, and token usage.",
-            "codex": "Implement the landing page components/styles using existing design tokens and verify the build.",
-            "claude": "Define the page architecture, content order, and acceptance criteria for the landing page.",
-            "copilot": "Add supporting UI glue, small component refinements, and smoke checks for the landing page.",
-            "deepseek": "Review edge cases, accessibility, responsive behavior, and performance for the landing page.",
-            "kimi": "Tighten landing page copy, section labels, and product messaging.",
-            "cline": "Run the repo commands needed to apply and validate the landing page changes.",
-            "bob": "Coordinate the landing page work and keep divisions.md current.",
-        }
-        if short in landing:
-            return landing[short]
-
-    generic = {
-        "gemini": f"Analyze UX/product requirements and propose the frontend approach for: {preview}",
-        "codex": f"Make the code changes and run focused verification for: {preview}",
-        "claude": f"Break down architecture, risks, and implementation order for: {preview}",
-        "copilot": f"Handle small implementation glue, tests, and docs for: {preview}",
-        "deepseek": f"Check edge cases, performance, and failure modes for: {preview}",
-        "kimi": f"Refine copy, naming, and user-facing details for: {preview}",
-        "cline": f"Execute repo automation and validation commands for: {preview}",
-        "bob": f"Coordinate the plan and reconcile agent outputs for: {preview}",
-    }
-    return generic.get(short, f"Work on your assigned slice of: {preview}")
-
-
-def _local_divisions(message: str, providers: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    """Split a user request across the enabled agents without requiring Watsonx."""
-    divisions: List[Dict[str, str]] = []
-    for provider in providers[:6]:
-        short = provider["name"]
-        divisions.append(
-            {
-                "agent": provider["display_name"],
-                "short": short,
-                "color": AGENT_COLORS.get(short, "#6366f1"),
-                "task": _task_for_provider(short, message),
-                "status": "running",
-            }
-        )
-    return divisions
-
-
-def _offline_chat_plan(
-    message: str,
-    providers_summary: str,
-    providers: Optional[List[Dict[str, str]]] = None,
-    reason: str = "Watsonx call skipped - credentials or SDK missing.",
-) -> Dict[str, Any]:
-    """Deterministic fallback that still routes work to enabled local agents."""
-    providers = providers or []
-    divisions = _local_divisions(message, providers)
-    if divisions:
-        content = (
-            f"I split this into {len(divisions)} agent assignment"
-            f"{'' if len(divisions) == 1 else 's'} and queued the work locally. "
-            "Watsonx is unavailable, so I used the built-in router."
-        )
-    else:
-        content = (
-            "No enabled agents are available to receive work yet. Enable at least one CLI "
-            "provider in Settings, then dispatch the task again."
-        )
-    return {
-        "content": content,
-        "thinking": [
-            "Parsed the user request locally.",
-            f"Enabled agents: {providers_summary}",
-            reason,
-            f"Created {len(divisions)} runnable agent assignment(s).",
-        ],
-        "divisions": divisions,
-        "artifacts": [{"name": "divisions.md", "kind": "md"}],
-        "model": "local-router",
-    }
-
-
 async def _write_divisions_artifact(
     db: aiosqlite.Connection,
     user_id: int,
     message: str,
-    plan: Dict[str, Any],
+    plan_metadata: Dict[str, Any],
 ) -> None:
-    """Persist the generated split to workspace/shared/divisions.md when possible."""
-    divisions = plan.get("divisions") or []
+    """Persist task divisions to workspace/shared/divisions.md."""
+    divisions = plan_metadata.get("divisions") or []
     if not divisions:
         return
     workspace = await fetch_active_workspace_path(db, user_id)
     if not workspace:
         return
 
-    shared_dir = Path(workspace) / "shared"
-    lines = [
-        "# Task Divisions",
-        "",
-        f"Task: {message.strip()}",
-        "",
-    ]
+    workspace_path = Path(workspace).resolve()
+    shared_dir = (workspace_path / "shared").resolve()
+    target_file = (shared_dir / "divisions.md").resolve()
+
+    # Ensure target_file resides within workspace_path to prevent path traversal (SEC-09)
+    try:
+        target_file.relative_to(workspace_path)
+    except ValueError:
+        logger.error(f"Security violation: path traversal attempt prevented in _write_divisions_artifact for {target_file}")
+        return
+
+    lines = ["# Task Divisions", "", f"Task: {message.strip()}", ""]
     for div in divisions:
         lines.extend(
             [
@@ -687,79 +595,130 @@ async def _write_divisions_artifact(
 
     def write_file() -> None:
         shared_dir.mkdir(parents=True, exist_ok=True)
-        (shared_dir / "divisions.md").write_text(text, encoding="utf-8")
+        target_file.write_text(text, encoding="utf-8")
 
     await asyncio.to_thread(write_file)
 
 
-def _parse_watsonx_plan(raw: str, fallback_message: str) -> Dict[str, Any]:
-    """Coerce the Watsonx response into our chat metadata schema."""
-    cleaned = _strip_code_fences(raw)
+async def update_division_status_for_provider(
+    db: aiosqlite.Connection,
+    user_id: int,
+    provider_slug: str,
+    status: str = "done",
+) -> None:
+    """Mark a division done in workspace/shared/divisions.md (HIGH-044)."""
+    workspace = await fetch_active_workspace_path(db, user_id)
+    if not workspace or not provider_slug:
+        return
+    workspace_path = Path(workspace).resolve()
+    target_file = (workspace_path / "shared" / "divisions.md").resolve()
     try:
-        # Find the first { ... } block in the response.
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            obj = json.loads(cleaned[start : end + 1])
-            if isinstance(obj, dict):
-                content = str(obj.get("content") or cleaned).strip()
-                return {
-                    "content": content or fallback_message,
-                    "thinking": [str(x) for x in (obj.get("thinking") or [])][:8],
-                    "divisions": list(obj.get("divisions") or []),
-                    "artifacts": list(obj.get("artifacts") or []),
-                }
-    except Exception:
-        pass
-    return {
-        "content": cleaned or fallback_message,
-        "thinking": [],
-        "divisions": [],
-        "artifacts": [],
-    }
+        target_file.relative_to(workspace_path)
+    except ValueError:
+        return
+    if not target_file.is_file():
+        return
+
+    slug = provider_slug.lower().strip()
+
+    def rewrite() -> None:
+        text = target_file.read_text(encoding="utf-8")
+        pattern = re.compile(
+            rf"(##[^\n]+\n(?:.*?\n)*?- Short id: {re.escape(slug)}\s*\n- Status: )\w+",
+            re.IGNORECASE,
+        )
+        updated = pattern.sub(rf"\1{status}", text, count=1)
+        if updated != text:
+            target_file.write_text(updated, encoding="utf-8")
+
+    await asyncio.to_thread(rewrite)
 
 
-@router.post("/chat", response_model=ChatResponse)
-async def chat_inference(
+async def _persist_assistant_message(
+    db: aiosqlite.Connection,
+    *,
+    user_id: int,
+    session_id: int,
+    plan,
+    metadata: Dict[str, Any],
+    request_message: str,
+) -> tuple[int, int, Optional[int]]:
+    """Insert assistant message + analytics; returns (message_id, tokens_used, orch_provider_id)."""
+    orch_provider_id = None
+    if plan.provider_id:
+        cur = await db.execute(
+            "SELECT id FROM providers WHERE name = ? LIMIT 1",
+            (plan.provider_id,),
+        )
+        prow = await cur.fetchone()
+        if prow:
+            orch_provider_id = int(prow["id"])
+
+    tokens_used = max(
+        1, plan.tokens_used or (len(request_message) + len(plan.content)) // 4
+    )
+    now = utc_now().isoformat()
+
+    cursor = await db.execute(
+        """
+        INSERT INTO messages (
+            session_id, role, content, content_type, metadata,
+            agent_name, model_name, provider_id, tokens_used, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            session_id,
+            "assistant",
+            plan.content,
+            "text",
+            json.dumps(metadata),
+            "Orchestrator",
+            plan.model,
+            orch_provider_id,
+            tokens_used,
+            now,
+            now,
+        ),
+    )
+    await db.commit()
+    ai_msg_id = cursor.lastrowid or 0
+
+    if orch_provider_id is not None:
+        await db.execute(
+            """
+            INSERT INTO usage_analytics (
+                user_id, session_id, provider_id, event_type,
+                event_category, tokens_used, cost_estimate, metadata, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                session_id,
+                orch_provider_id,
+                "message_received",
+                "chat",
+                tokens_used,
+                plan.cost_estimate,
+                json.dumps({"model": plan.model, "source": "orchestrator_chat"}),
+                utc_now().isoformat(),
+            ),
+        )
+        await db.commit()
+
+    return int(ai_msg_id), tokens_used, orch_provider_id
+
+
+async def _prepare_chat_context(
     request: ChatRequest,
-    db: aiosqlite.Connection = Depends(get_db),
-    user_id: int = Depends(get_current_user_id)
-) -> ChatResponse:
-    """
-    Chat with IBM Watsonx Granite. Persists user + assistant messages.
-    Returns a structured plan in `metadata` (thinking / divisions / artifacts).
-    """
-    logger = logging.getLogger(__name__)
+    db: aiosqlite.Connection,
+    user_id: int,
+) -> tuple[int, SharedContext, RoutingStrategy]:
+    """Create/load session, persist user message, build SharedContext."""
     session_id = request.session_id
 
-    # Lazy import so a missing SDK only affects this endpoint, not the whole app.
-    try:
-        from backend.services.ibm_watson_service import (
-            IBM_WATSON_AVAILABLE,
-            WatsonxService,
-            get_nlu_service,
-        )
-    except Exception as e:  # pragma: no cover
-        IBM_WATSON_AVAILABLE = False
-        WatsonxService = None  # type: ignore
-        get_nlu_service = None  # type: ignore
-        logger.warning(f"Watson service unavailable: {e}")
+    if session_id is not None:
+        await verify_session_owned_by_user(int(session_id), user_id, db)
 
-    from backend.config import settings as _settings
-    watsonx_ready = (
-        IBM_WATSON_AVAILABLE
-        and bool(_settings.watsonx_api_key)
-        and bool(_settings.watsonx_project_id)
-    )
-    nlu_ready = (
-        IBM_WATSON_AVAILABLE
-        and bool(_settings.nlu_api_key)
-        and bool(_settings.nlu_url)
-        and get_nlu_service is not None
-    )
-    ai_mode = (_settings.orchestrator_ai or "auto").strip().lower()
-
-    # Ensure active session exists
     if session_id is None:
         now = utc_now().isoformat()
         cursor = await db.execute(
@@ -780,7 +739,6 @@ async def chat_inference(
         await db.commit()
         session_id = cursor.lastrowid
 
-    # Save user message
     now = utc_now().isoformat()
     await db.execute(
         """
@@ -792,183 +750,173 @@ async def chat_inference(
     )
     await db.commit()
 
-    provider_rows = await _enabled_provider_rows(db, user_id)
-    providers_summary = (
-        ", ".join(
-            f"{r['display_name']} [{r['name']}] ({r['default_model']})"
-            for r in provider_rows
+    workspace = await fetch_active_workspace_path(db, user_id)
+    ctx = SharedContext(
+        session_id=int(session_id),
+        workspace_path=workspace,
+        user_message=request.message,
+    )
+    if session_id:
+        history = await _load_session_history(db, int(session_id), limit=30)
+        for msg in history[:-1]:
+            ctx.append_history(msg["role"], msg["content"])
+    ctx_files = await _resolve_context_files(db, user_id, request.context_files)
+    if ctx_files:
+        ctx.append_history(
+            "system",
+            "Attached context files:\n" + "\n---\n".join(ctx_files),
         )
-        if provider_rows
-        else "(no providers enabled)"
+    ctx.append_history("user", request.message)
+
+    config_row = await _fetch_orchestrator_config_row(db, user_id)
+    routing_strategy = RoutingStrategy(config_row["routing_strategy"])
+    return int(session_id), ctx, routing_strategy
+
+
+async def _stream_chat_events(
+    request: ChatRequest,
+    db: aiosqlite.Connection,
+    user_id: int,
+) -> AsyncIterator[str]:
+    """SSE stream for chat when stream=true (MED-013)."""
+    session_id, ctx, routing_strategy = await _prepare_chat_context(request, db, user_id)
+    yield f"data: {json.dumps({'type': 'start', 'session_id': session_id})}\n\n"
+
+    engine = get_orchestrator_engine()
+    plan = await engine.run(
+        db,
+        user_id,
+        ctx,
+        model=request.model_name,
+        routing_strategy=routing_strategy.value,
+        preferred_provider_db_id=request.provider_id,
     )
 
-    model_id = request.model_name or "ibm/granite-13b-chat-v2"
-    fallback_text = "I'm here. What would you like to build?"
-    full_prompt = ""
-    plan: Dict[str, Any]
-
-    async def _run_nlu() -> Dict[str, Any]:
-        nlu = get_nlu_service()
-        analysis = await asyncio.to_thread(nlu.analyze, request.message)
-        return _plan_from_nlu_analysis(request.message, analysis, providers_summary)
-
-    use_watsonx = ai_mode in ("auto", "watsonx") and watsonx_ready
-    use_nlu = ai_mode in ("auto", "nlu") and nlu_ready
-
-    if use_watsonx and ai_mode != "nlu":
-        full_prompt = (
-            ORCHESTRATOR_SYSTEM_PROMPT
-            + f"\n\nEnabled agents: {providers_summary}\n\n"
-            + f"User: {request.message}\n\n"
-            + "Respond now with the JSON object only:\n"
+    metadata = plan.to_metadata_dict()
+    if request.metadata:
+        metadata.update(request.metadata)
+    divisions = metadata.get("divisions") or []
+    if divisions:
+        delegated = await _delegate_divisions_to_agents(
+            db, user_id, int(session_id), divisions
         )
-        try:
-            watsonx = WatsonxService()
-            raw = await asyncio.to_thread(
-                watsonx.generate_text,
-                prompt=full_prompt,
-                model_id=model_id,
-                parameters={"max_new_tokens": 600, "decoding_method": "greedy"},
-            )
-            plan = _parse_watsonx_plan(str(raw), fallback_text)
-            plan["model"] = model_id
-        except Exception as e:
-            logger.exception("watsonx call failed")
-            err = str(e)
-            if use_nlu:
-                logger.info("Falling back to Watson NLU after Watsonx failure")
-                try:
-                    plan = await _run_nlu()
-                except Exception as nlu_err:
-                    logger.exception("NLU fallback failed")
-                    plan = _offline_chat_plan(
-                        request.message,
-                        providers_summary,
-                        provider_rows,
-                        reason=f"Watsonx failed ({err[:120]}). NLU also failed ({nlu_err}).",
-                    )
-            else:
-                plan = _offline_chat_plan(
-                    request.message,
-                    providers_summary,
-                    provider_rows,
-                    reason=f"Watsonx failed ({err[:160]}).",
-                )
-                if "403" in err or "Forbidden" in err or "not a member of the project" in err:
-                    plan["thinking"].insert(
-                        0,
-                        "Watsonx rejected the project ID (403); local router used instead.",
-                    )
-                else:
-                    plan["content"] = (
-                        f"Watsonx call failed ({err[:200]}). Showing a local fallback."
-                    )
-    elif use_nlu:
-        try:
-            plan = await _run_nlu()
-        except Exception as e:
-            logger.exception("NLU chat failed")
-            plan = _offline_chat_plan(
-                request.message,
-                providers_summary,
-                provider_rows,
-                reason=f"Watson NLU failed: {e}",
-            )
-    else:
-        if not IBM_WATSON_AVAILABLE:
-            logger.warning("IBM Watson SDK unavailable — offline chat fallback")
-        plan = _offline_chat_plan(request.message, providers_summary, provider_rows)
-        if nlu_ready and ai_mode == "watsonx":
-            plan["content"] += " (NLU is configured; set ORCHESTRATOR_AI=auto or nlu to use it.)"
-
-    if provider_rows and not plan.get("divisions"):
-        divisions = _local_divisions(request.message, provider_rows)
-        plan["divisions"] = divisions
-        plan["artifacts"] = [{"name": "divisions.md", "kind": "md"}]
-        plan["thinking"] = [
-            *(plan.get("thinking") or []),
-            f"Local router added {len(divisions)} runnable agent assignment(s).",
-        ]
+        metadata["delegated_agents"] = delegated
+        aggregate_agent_results(plan, {a: "task assigned" for a in delegated})
+        metadata = plan.to_metadata_dict()
 
     try:
-        await _write_divisions_artifact(db, user_id, request.message, plan)
+        await _write_divisions_artifact(db, user_id, request.message, metadata)
     except Exception:
         logger.exception("failed to write divisions.md")
-
-    cursor = await db.execute("SELECT id FROM providers WHERE name = 'bob' LIMIT 1")
-    bob_row = await cursor.fetchone()
-    bob_provider_id = int(bob_row["id"]) if bob_row else None
-
-    response_model = plan.get("model", model_id)
-    tokens_used = max(
-        1,
-        (len(full_prompt or request.message) + len(plan.get("content", ""))) // 4,
-    )
-
-    now = utc_now().isoformat()
-    metadata = {
-        "thinking": plan.get("thinking", []),
-        "divisions": plan.get("divisions", []),
-        "artifacts": plan.get("artifacts", []),
-        "model": response_model,
-    }
-    if plan.get("nlu"):
-        metadata["nlu"] = plan["nlu"]
-    cursor = await db.execute(
-        """
-        INSERT INTO messages (
-            session_id, role, content, content_type, metadata,
-            agent_name, model_name, provider_id, tokens_used, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            session_id,
-            "assistant",
-            plan["content"],
-            "text",
-            json.dumps(metadata),
-            "Orchestrator",
-            response_model,
-            bob_provider_id,
-            tokens_used,
-            now,
-            now,
-        ),
-    )
-    await db.commit()
-    ai_msg_id = cursor.lastrowid
-
-    if bob_provider_id is not None:
-        cost_guess = round(tokens_used * 0.0000025, 6)
-        await db.execute(
-            """
-            INSERT INTO usage_analytics (
-                user_id, session_id, provider_id, event_type,
-                event_category, tokens_used, cost_estimate, metadata, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                user_id,
-                session_id,
-                bob_provider_id,
-                "message_received",
-                "chat",
-                tokens_used,
-                cost_guess,
-                json.dumps({"model": model_id, "source": "orchestrator_chat"}),
-                utc_now().isoformat(),
-            ),
+        metadata.setdefault("thinking", []).append(
+            "Warning: could not write divisions.md to workspace shared folder."
         )
-        await db.commit()
+
+    content = plan.content or ""
+    for i in range(0, len(content), 80):
+        chunk = content[i : i + 80]
+        yield f"data: {json.dumps({'type': 'token', 'content': chunk})}\n\n"
+
+    ai_msg_id, tokens_used, _ = await _persist_assistant_message(
+        db,
+        user_id=user_id,
+        session_id=int(session_id),
+        plan=plan,
+        metadata=metadata,
+        request_message=request.message,
+    )
+
+    yield f"data: {json.dumps({'type': 'done', 'session_id': session_id, 'message_id': ai_msg_id, 'tokens_used': tokens_used, 'metadata': metadata})}\n\n"
+
+
+@router.get("/providers/health")
+async def orchestrator_provider_health(
+    db: aiosqlite.Connection = Depends(get_db),
+    user_id: int = Depends(get_current_user_id),
+) -> List[Dict[str, Any]]:
+    """Health check all configured orchestrator LLM providers."""
+    engine = get_orchestrator_engine()
+    configs = await engine.load_llm_configs(db, user_id)
+    health = await engine.router.health_check_all(configs)
+    return [
+        {
+            "provider_id": h.provider_id,
+            "status": h.status.value,
+            "latency_ms": h.latency_ms,
+            "message": h.message,
+        }
+        for h in health
+    ]
+
+
+@router.post("/chat", response_model=ChatResponse)
+async def chat_inference(
+    request: ChatRequest,
+    db: aiosqlite.Connection = Depends(get_db),
+    user_id: int = Depends(get_current_user_id),
+) -> ChatResponse:
+    """
+    Chat with the central orchestrator. Uses Grok / DeepSeek / Gemini with
+    automatic fallback, then delegates work to enabled CLI agents.
+    """
+    if len(request.message) > MAX_CHAT_MESSAGE_LEN:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Message exceeds {MAX_CHAT_MESSAGE_LEN} characters",
+        )
+
+    if request.stream:
+        return StreamingResponse(
+            _stream_chat_events(request, db, user_id),
+            media_type="text/event-stream",
+        )
+
+    session_id, ctx, routing_strategy = await _prepare_chat_context(request, db, user_id)
+
+    engine = get_orchestrator_engine()
+    plan = await engine.run(
+        db,
+        user_id,
+        ctx,
+        model=request.model_name,
+        routing_strategy=routing_strategy.value,
+        preferred_provider_db_id=request.provider_id,
+    )
+
+    metadata = plan.to_metadata_dict()
+    if request.metadata:
+        metadata.update(request.metadata)
+    divisions = metadata.get("divisions") or []
+    if divisions:
+        delegated = await _delegate_divisions_to_agents(
+            db, user_id, int(session_id), divisions
+        )
+        metadata["delegated_agents"] = delegated
+        aggregate_agent_results(plan, {a: "task assigned" for a in delegated})
+        metadata = plan.to_metadata_dict()
+    try:
+        await _write_divisions_artifact(db, user_id, request.message, metadata)
+    except Exception:
+        logger.exception("failed to write divisions.md")
+        metadata.setdefault("thinking", []).append(
+            "Warning: could not write divisions.md to workspace shared folder."
+        )
+
+    ai_msg_id, tokens_used, _ = await _persist_assistant_message(
+        db,
+        user_id=user_id,
+        session_id=int(session_id),
+        plan=plan,
+        metadata=metadata,
+        request_message=request.message,
+    )
 
     return ChatResponse(
         session_id=session_id,
         message_id=ai_msg_id,
-        content=plan["content"],
+        content=plan.content,
         role=MessageRole.ASSISTANT,
         agent_name="Orchestrator",
         tokens_used=tokens_used,
         metadata=metadata,
     )
-
-# Made with Bob

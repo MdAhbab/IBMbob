@@ -22,8 +22,25 @@ export function apiPath(path: string): string {
  */
 export function wsPath(path: string): string {
   const p = path.startsWith("/") ? path : `/${path}`;
+  
+  // FE-08: Support custom WebSocket base URLs from VITE_WS_BASE
+  const envWsBase = (import.meta.env.VITE_WS_BASE as string | undefined)?.trim();
+  if (envWsBase) {
+    const base = envWsBase.endsWith("/") ? envWsBase.slice(0, -1) : envWsBase;
+    return `${base}${p}`;
+  }
+
   if (typeof window === "undefined") return p;
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  if (isAbsoluteApiBase) {
+    try {
+      const url = new URL(normalizedApiBase);
+      const wsProto = url.protocol === "https:" ? "wss:" : "ws:";
+      return `${wsProto}//${url.host}${p}`;
+    } catch {
+      return `${proto}//${window.location.host}${p}`;
+    }
+  }
   return `${proto}//${window.location.host}${p}`;
 }
 
@@ -35,7 +52,7 @@ export function healthCheckUrl(): string {
 /** @deprecated use healthCheckUrl() */
 export const healthPath = healthCheckUrl();
 
-const DEFAULT_FETCH_MS = 25_000;
+const DEFAULT_FETCH_MS = 8000;
 
 /** fetch() with an AbortSignal timeout so hung backends surface errors in the UI. */
 export function apiFetch(
@@ -56,4 +73,31 @@ export function isAbortError(err: unknown): boolean {
     err instanceof DOMException &&
     (err.name === "AbortError" || err.name === "TimeoutError")
   );
+}
+
+/** Parse SSE `data:` lines from a streaming orchestrator chat response. */
+export async function readSseJsonStream(
+  res: Response,
+  onEvent: (payload: Record<string, unknown>) => void,
+): Promise<void> {
+  const reader = res.body?.getReader();
+  if (!reader) throw new Error("No response body");
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split("\n\n");
+    buffer = parts.pop() ?? "";
+    for (const part of parts) {
+      const line = part.trim();
+      if (!line.startsWith("data: ")) continue;
+      try {
+        onEvent(JSON.parse(line.slice(6)) as Record<string, unknown>);
+      } catch {
+        // ignore malformed chunks
+      }
+    }
+  }
 }

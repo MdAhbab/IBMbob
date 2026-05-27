@@ -43,10 +43,20 @@ export const CLI_INSTALL_BY_ID: Record<string, CliInstallInfo> = {
     verify: "cline --version",
     notes: "Bring-your-own-key; configure provider keys after install.",
   },
-  bob: {
-    install: "pip install ibm-watsonx-ai",
-    verify: "python -c \"import ibm_watsonx_ai; print('ok')\"",
-    notes: "Orchestrator chat uses Watsonx — set WATSONX_API_KEY and WATSONX_PROJECT_ID in backend/.env.",
+  grok: {
+    install: "Configure GROK_API_KEY in Settings or backend/.env",
+    verify: "curl https://api.x.ai/v1/models -H \"Authorization: Bearer $GROK_API_KEY\"",
+    notes: "Grok powers orchestrator planning via the xAI API (no local CLI required).",
+  },
+  "gemini-api": {
+    install: "Configure GEMINI_API_KEY in Settings or backend/.env",
+    verify: "See Google AI Studio for API key validation",
+    notes: "Gemini API is used as an orchestrator LLM fallback.",
+  },
+  "deepseek-api": {
+    install: "Configure DEEPSEEK_API_KEY in Settings or backend/.env",
+    verify: "curl https://api.deepseek.com/v1/models -H \"Authorization: Bearer $DEEPSEEK_API_KEY\"",
+    notes: "DeepSeek API is used as an orchestrator LLM fallback.",
   },
 };
 

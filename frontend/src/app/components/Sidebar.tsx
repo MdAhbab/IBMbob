@@ -9,13 +9,23 @@ import {
   Loader2,
   Menu,
   Search,
+  Settings as SettingsIcon,
   Sparkles,
   X,
 } from "lucide-react";
 import { OrchestratorLogo } from "./OrchestratorLogo";
 import { useStore, type Status, type SessionEntry } from "./store";
 import { apiFetch, apiPath, healthCheckUrl } from "../lib/api";
+import { fetchSessionEntries } from "../lib/loadSessions";
+import { SESSIONS_CHANGED } from "../lib/sessionsBus";
 
+function mapSessionStatus(raw: string): SessionEntry["status"] {
+  if (raw === "completed") return "completed";
+  if (raw === "failed") return "failed";
+  if (raw === "paused") return "paused";
+  if (raw === "archived") return "archived";
+  return "active";
+}
 const STATUS_MAP: Record<Status, { dot: string; label: string; text: string }> = {
   online: { dot: "bg-emerald-500", label: "online", text: "text-emerald-600 dark:text-emerald-400" },
   offline: { dot: "bg-zinc-400", label: "offline", text: "text-zinc-500" },
@@ -36,6 +46,8 @@ const STATUS_ICON: Record<SessionEntry["status"], { Icon: typeof CircleCheck; cl
   completed: { Icon: CircleCheck, cls: "text-emerald-500" },
   failed: { Icon: CircleX, cls: "text-rose-500" },
   active: { Icon: Loader2, cls: "text-indigo-500 animate-spin" },
+  paused: { Icon: Clock, cls: "text-amber-500" },
+  archived: { Icon: CircleX, cls: "text-zinc-400" },
 };
 
 function HistoryItem({
@@ -92,7 +104,7 @@ export function Sidebar({
   /** Load a session's messages in the main chat view */
   onSelectSession?: (sessionId: number) => void;
 }) {
-  const { providers, sessions: localSessions } = useStore();
+  const { providers } = useStore();
   const [collapsed, setCollapsed] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(true);
   const [gitOpen, setGitOpen] = useState(true);
@@ -109,25 +121,7 @@ export function Sidebar({
     let cancelled = false;
     const load = async () => {
       try {
-        const r = await fetch(apiPath("/sessions?limit=20"));
-        if (!r.ok) return;
-        const j = await r.json();
-        if (cancelled) return;
-        const mapped: SessionEntry[] = (j.sessions ?? []).map((s: any) => ({
-          id: String(s.id),
-          prompt: s.title ?? "(untitled session)",
-          status:
-            s.status === "completed"
-              ? "completed"
-              : s.status === "failed" || s.status === "archived"
-              ? "failed"
-              : "active",
-          startedAt: new Date(s.created_at).getTime(),
-          agents: [],
-          spend: 0,
-          divisions: [],
-          artifacts: [],
-        }));
+        const mapped = await fetchSessionEntries(20);
         setRemoteSessions(mapped);
       } catch (err) {
         console.warn("sessions load failed", err);
@@ -135,9 +129,12 @@ export function Sidebar({
     };
     void load();
     const id = window.setInterval(load, 15000);
+    const onRefresh = () => void load();
+    window.addEventListener(SESSIONS_CHANGED, onRefresh);
     return () => {
       cancelled = true;
       window.clearInterval(id);
+      window.removeEventListener(SESSIONS_CHANGED, onRefresh);
     };
   }, []);
 
@@ -169,11 +166,16 @@ export function Sidebar({
   const runGit = async () => {
     if (!gitCmd.trim()) return;
     try {
-      const r = await fetch(apiPath("/workspace/git/run"), {
+      const r = await apiFetch("/workspace/git/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ command: gitCmd }),
       });
+      if (!r.ok) {
+        const detail = await r.text();
+        setGitOutput(`error (${r.status}): ${detail}`);
+        return;
+      }
       const j = await r.json();
       const stdout = j.stdout || "";
       const stderr = j.stderr || j.detail || "";
@@ -184,7 +186,7 @@ export function Sidebar({
     }
   };
 
-  const sessions = remoteSessions.length > 0 ? remoteSessions : localSessions;
+  const sessions = remoteSessions;
 
   useEffect(() => {
     const mq = window.matchMedia("(max-width: 1024px)");
@@ -200,9 +202,9 @@ export function Sidebar({
     const checkBackendHealth = async () => {
       const startedAt = performance.now();
       try {
-        const response = await fetch(healthCheckUrl(), {
+        const response = await apiFetch(healthCheckUrl(), {
           cache: "no-store",
-          signal: AbortSignal.timeout(8_000),
+          timeoutMs: 8000,
         });
         if (!response.ok) {
           throw new Error(`Health check failed with status ${response.status}`);
@@ -557,7 +559,7 @@ export function Sidebar({
               className="mb-1 rounded-md border border-zinc-200/70 bg-white p-1.5 text-zinc-500 dark:border-white/[0.07] dark:bg-white/[0.02] dark:text-zinc-400"
               title="Settings"
             >
-              <Clock className="h-3.5 w-3.5" />
+              <SettingsIcon className="h-3.5 w-3.5" />
             </button>
           )}
         </aside>

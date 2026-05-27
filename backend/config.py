@@ -1,5 +1,5 @@
 """
-Application configuration for IBM Bob Backend.
+Application configuration for the AI Orchestrator platform.
 Uses Pydantic Settings for environment variable management.
 """
 
@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
     
     # Application
-    app_name: str = "IBM Bob Backend"
+    app_name: str = "AI Orchestrator Backend"
     app_version: str = "1.0.0"
     debug: bool = False
     
@@ -72,8 +72,8 @@ class Settings(BaseSettings):
         return v
     
     # Database
-    database_url: str = "sqlite+aiosqlite:///./data/bob.db"
-    database_path: Path = Path("./data/bob.db")
+    database_url: str = "sqlite+aiosqlite:///./data/orchestrator.db"
+    database_path: Path = Path("./data/orchestrator.db")
     database_echo: bool = False
     
     # File Storage
@@ -90,6 +90,8 @@ class Settings(BaseSettings):
     secret_key: str = ""  # Must be set via environment variable
     encryption_key: Optional[str] = None  # For encrypting provider credentials
     access_token_expire_minutes: int = 60 * 24 * 7  # 7 days
+    single_user_mode: bool = True  # If True, runs in local single-user mode (user_id=1)
+
     
     @field_validator('secret_key')
     @classmethod
@@ -120,17 +122,17 @@ class Settings(BaseSettings):
             raise ValueError("max_retries must be between 0 and 10")
         return v
     
-    # IBM Watson Configuration
-    stt_api_key: Optional[str] = None
-    stt_url: Optional[str] = None
-    watsonx_api_key: Optional[str] = None
-    watsonx_project_id: Optional[str] = None
-    nlu_api_key: Optional[str] = None
-    nlu_url: Optional[str] = None
-    # Orchestrator chat: auto | watsonx | nlu
-    orchestrator_ai: str = "auto"
+    # Orchestrator LLM providers (optional env fallbacks; prefer Settings UI + DB credentials)
+    grok_api_key: Optional[str] = None
+    grok_base_url: Optional[str] = None
+    deepseek_api_key: Optional[str] = None
+    gemini_api_key: Optional[str] = None
+    default_orchestrator_model: Optional[str] = None
+    orchestrator_provider_priority: Annotated[List[str], NoDecode] = [
+        "grok", "gemini-api", "deepseek-api"
+    ]
     
-    # Orchestrator
+    # Orchestrator runtime
     default_routing_strategy: str = "auto"
     max_retries: int = 3
     timeout_seconds: int = 30
@@ -155,7 +157,7 @@ class Settings(BaseSettings):
     
     def model_post_init(self, __context) -> None:
         """Post-initialization hook to create directories."""
-        ud = os.environ.get("IBMBOB_USER_DATA", "").strip()
+        ud = os.environ.get("ORCHESTRATOR_USER_DATA", "").strip() or os.environ.get("IBMBOB_USER_DATA", "").strip()
         if ud:
             root = Path(ud)
             object.__setattr__(self, "upload_dir", root / "uploads")
@@ -165,6 +167,18 @@ class Settings(BaseSettings):
             derived_database_path = self._parse_sqlite_path_from_url(self.database_url)
             if derived_database_path is not None:
                 self.database_path = derived_database_path
+        # Resolve relative DB path to absolute under backend or user-data (MED-030)
+        if not self.database_path.is_absolute():
+            base = Path(ud) if ud else config_dir.parent
+            self.database_path = (base / self.database_path).resolve()
+        # LOW-020: prefer orchestrator.db; fall back to legacy bob.db if present
+        legacy_db = self.database_path.parent / "bob.db"
+        if legacy_db.is_file() and not self.database_path.is_file():
+            self.database_path = legacy_db.resolve()
+        if not self.debug and not (self.encryption_key or "").strip():
+            raise ValueError(
+                "ENCRYPTION_KEY must be set when DEBUG is false (production mode)."
+            )
         self._create_directories()
 
     @staticmethod
@@ -193,4 +207,3 @@ class Settings(BaseSettings):
 # Global settings instance
 settings = Settings()
 
-# Made with Bob

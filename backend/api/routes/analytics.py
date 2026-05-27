@@ -500,32 +500,28 @@ async def list_recent_analytics_events(
     return out
 
 
+class AnalyticsEventCreate(BaseModel):
+    """JSON body for POST /analytics/events (MED-054)."""
+
+    event_type: EventType
+    session_id: Optional[int] = None
+    provider_id: Optional[int] = None
+    tokens_used: int = 0
+    cost_estimate: float = 0.0
+    metadata: Optional[Dict[str, Any]] = None
+
+
 @router.post("/events", status_code=status.HTTP_201_CREATED)
 async def log_analytics_event(
-    event_type: EventType,
-    session_id: Optional[int] = None,
-    provider_id: Optional[int] = None,
-    tokens_used: int = 0,
-    cost_estimate: float = 0.0,
-    metadata: Optional[Dict[str, Any]] = None,
+    body: AnalyticsEventCreate,
     db: aiosqlite.Connection = Depends(get_db),
-    user_id: int = Depends(get_current_user_id)
+    user_id: int = Depends(get_current_user_id),
 ):
     """
-    Log an analytics event.
-    
-    Args:
-        event_type: Type of event
-        session_id: Optional session ID
-        provider_id: Optional provider ID
-        tokens_used: Number of tokens used
-        cost_estimate: Estimated cost
-        metadata: Additional metadata
-        db: Database connection
-        user_id: Current user ID
+    Log an analytics event from the client or internal services.
     """
     now = utc_now()
-    
+
     await db.execute(
         """
         INSERT INTO usage_analytics (
@@ -535,17 +531,16 @@ async def log_analytics_event(
         """,
         (
             user_id,
-            session_id,
-            provider_id,
-            event_type.value,
-            tokens_used,
-            cost_estimate,
-            json.dumps(metadata) if metadata else None,
-            now.isoformat()
-        )
+            body.session_id,
+            body.provider_id,
+            body.event_type.value,
+            body.tokens_used,
+            body.cost_estimate,
+            json.dumps(body.metadata) if body.metadata else None,
+            now.isoformat(),
+        ),
     )
     await db.commit()
-    
-    return {"status": "success", "event_type": event_type.value}
 
-# Made with Bob
+    return {"status": "success", "event_type": body.event_type.value}
+

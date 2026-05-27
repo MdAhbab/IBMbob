@@ -1,7 +1,9 @@
 import { ArrowUp, CornerDownLeft, Paperclip } from "lucide-react";
 import { useRef } from "react";
 import { VoiceButton } from "./VoiceButton";
-import { apiPath } from "../lib/api";
+import { apiFetch } from "../lib/api";
+
+const MAX_CHAT_CHARS = 32_000;
 
 export function GlobalChatBar({
   value,
@@ -10,6 +12,8 @@ export function GlobalChatBar({
   onVoice,
   onPartial,
   sessionId,
+  disabled = false,
+  onAttached,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -17,24 +21,35 @@ export function GlobalChatBar({
   onVoice: (t: string) => void;
   onPartial: (t: string) => void;
   sessionId?: number | null;
+  disabled?: boolean;
+  onAttached?: (relativePaths: string[]) => void;
 }) {
   const fileRef = useRef<HTMLInputElement | null>(null);
 
   const attachFiles = async (files: FileList | null) => {
-    if (!files?.length || sessionId == null) return;
+    if (!files?.length) return;
+    const uploaded: string[] = [];
     for (const file of Array.from(files)) {
       try {
         const fd = new FormData();
         fd.append("file", file);
-        fd.append("session_id", String(sessionId));
-        const res = await fetch(apiPath("/workspace/context"), { method: "POST", body: fd });
+        const path = sessionId != null ? "/workspace/context" : "/workspace/shared";
+        if (sessionId != null) {
+          fd.append("session_id", String(sessionId));
+        }
+        const res = await apiFetch(path, { method: "POST", body: fd, timeoutMs: 30_000 });
         if (!res.ok) {
           console.warn("attach failed", await res.text());
+          continue;
         }
+        const body = await res.json();
+        const rel = (body.relative_path as string) || (body.filename as string) || file.name;
+        uploaded.push(rel);
       } catch (e) {
         console.warn("attach error", e);
       }
     }
+    if (uploaded.length) onAttached?.(uploaded);
     if (fileRef.current) fileRef.current.value = "";
   };
 
@@ -44,6 +59,10 @@ export function GlobalChatBar({
         <form
           onSubmit={(e) => {
             e.preventDefault();
+            if (value.length > MAX_CHAT_CHARS) {
+              alert(`Message exceeds ${MAX_CHAT_CHARS} characters.`);
+              return;
+            }
             onSubmit();
           }}
           className="relative flex items-end gap-2"
@@ -60,7 +79,8 @@ export function GlobalChatBar({
               }}
               placeholder="Describe a task. The orchestrator will divide it across your AIs…"
               rows={2}
-              className="scrollbar-hide block max-h-40 w-full resize-none bg-transparent px-4 pt-3 text-[14px] leading-relaxed text-zinc-900 outline-none placeholder:text-zinc-400 dark:text-zinc-100"
+              disabled={disabled}
+              className="scrollbar-hide block max-h-40 w-full resize-none bg-transparent px-4 pt-3 text-[14px] leading-relaxed text-zinc-900 outline-none placeholder:text-zinc-400 disabled:opacity-60 dark:text-zinc-100"
             />
             <div className="flex items-center justify-between gap-2 px-3 py-2">
               <div className="flex items-center gap-1">
@@ -74,9 +94,12 @@ export function GlobalChatBar({
                 <button
                   type="button"
                   onClick={() => fileRef.current?.click()}
-                  disabled={sessionId == null}
-                  title={sessionId == null ? "Start chatting to attach files to a session" : "Attach files"}
-                  className="flex items-center gap-1 rounded-md border border-zinc-200/70 bg-zinc-50 px-2 py-1 text-[11px] text-zinc-600 hover:bg-zinc-100 disabled:opacity-40 dark:border-white/[0.07] dark:bg-white/[0.02] dark:text-zinc-300 dark:hover:bg-white/[0.05]"
+                  title={
+                    sessionId == null
+                      ? "Attach to workspace/shared"
+                      : "Attach files to session"
+                  }
+                  className="flex items-center gap-1 rounded-md border border-zinc-200/70 bg-zinc-50 px-2 py-1 text-[11px] text-zinc-600 hover:bg-zinc-100 dark:border-white/[0.07] dark:bg-white/[0.02] dark:text-zinc-300 dark:hover:bg-white/[0.05]"
                 >
                   <Paperclip className="h-3 w-3" /> Attach
                 </button>
@@ -86,11 +109,11 @@ export function GlobalChatBar({
               </div>
               <button
                 type="submit"
-                disabled={!value.trim()}
+                disabled={!value.trim() || disabled}
                 className="flex items-center gap-1.5 rounded-lg bg-zinc-900 px-3 py-1.5 text-[12px] text-white shadow-sm transition hover:bg-zinc-800 disabled:opacity-40 dark:bg-white dark:text-zinc-900 dark:hover:bg-zinc-200"
               >
                 <ArrowUp className="h-3.5 w-3.5" />
-                Dispatch
+                {disabled ? "Sending…" : "Dispatch"}
               </button>
             </div>
           </div>

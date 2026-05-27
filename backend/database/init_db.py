@@ -1,5 +1,5 @@
 """
-Database initialization module for IBM Bob Backend System.
+Database initialization module for the AI Orchestrator platform.
 Handles SQLite database creation, schema initialization, and default data seeding.
 """
 
@@ -154,7 +154,7 @@ class DatabaseInitializer:
                             command TEXT NOT NULL,
                             working_directory TEXT NOT NULL,
                             status TEXT NOT NULL DEFAULT 'running'
-                                CHECK(status IN ('running','completed','failed','killed','paused')),
+                                CHECK(status IN ('running','completed','failed','killed','paused','pending')),
                             exit_code INTEGER,
                             started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                             completed_at TIMESTAMP,
@@ -181,6 +181,12 @@ class DatabaseInitializer:
                         PRAGMA foreign_keys=ON;
                         """
                     )
+                cur.execute("PRAGMA table_info(providers)")
+                prov_cols = {row[1]: row for row in cur.fetchall()}
+                if "cost_per_token" not in prov_cols:
+                    logger.info("Migration: adding cost_per_token to providers")
+                    cur.execute("ALTER TABLE providers ADD COLUMN cost_per_token REAL DEFAULT 0.0")
+
                 conn.commit()
                 logger.info("Migrations applied successfully")
         except Exception as e:
@@ -237,7 +243,7 @@ class DatabaseInitializer:
                 'display_name': 'OpenAI',
                 'provider_type': 'llm',
                 'base_url': 'https://api.openai.com/v1',
-                'is_enabled': 1,
+                'is_enabled': 0,
                 'supports_streaming': 1,
                 'supports_function_calling': 1,
                 'max_tokens': 128000,
@@ -252,7 +258,7 @@ class DatabaseInitializer:
                 'display_name': 'Anthropic Claude',
                 'provider_type': 'llm',
                 'base_url': 'https://api.anthropic.com/v1',
-                'is_enabled': 1,
+                'is_enabled': 0,
                 'supports_streaming': 1,
                 'supports_function_calling': 1,
                 'max_tokens': 200000,
@@ -266,7 +272,7 @@ class DatabaseInitializer:
                 'display_name': 'Google Gemini',
                 'provider_type': 'llm',
                 'base_url': 'https://generativelanguage.googleapis.com/v1',
-                'is_enabled': 1,
+                'is_enabled': 0,
                 'supports_streaming': 1,
                 'supports_function_calling': 1,
                 'max_tokens': 1000000,
@@ -280,7 +286,7 @@ class DatabaseInitializer:
                 'display_name': 'Ollama (Local)',
                 'provider_type': 'llm',
                 'base_url': 'http://localhost:11434',
-                'is_enabled': 1,
+                'is_enabled': 0,
                 'supports_streaming': 1,
                 'supports_function_calling': 0,
                 'max_tokens': 32768,
@@ -294,7 +300,7 @@ class DatabaseInitializer:
                 'display_name': 'OpenAI Embeddings',
                 'provider_type': 'embedding',
                 'base_url': 'https://api.openai.com/v1',
-                'is_enabled': 1,
+                'is_enabled': 0,
                 'supports_streaming': 0,
                 'supports_function_calling': 0,
                 'default_model': 'text-embedding-3-large',
@@ -307,7 +313,7 @@ class DatabaseInitializer:
                 'display_name': 'OpenAI Text-to-Speech',
                 'provider_type': 'tts',
                 'base_url': 'https://api.openai.com/v1',
-                'is_enabled': 1,
+                'is_enabled': 0,
                 'supports_streaming': 1,
                 'supports_function_calling': 0,
                 'default_model': 'tts-1',
@@ -320,7 +326,7 @@ class DatabaseInitializer:
                 'display_name': 'OpenAI Speech-to-Text',
                 'provider_type': 'stt',
                 'base_url': 'https://api.openai.com/v1',
-                'is_enabled': 1,
+                'is_enabled': 0,
                 'supports_streaming': 0,
                 'supports_function_calling': 0,
                 'default_model': 'whisper-1',
@@ -329,18 +335,51 @@ class DatabaseInitializer:
                 })
             },
             {
-                'name': 'bob',
-                'display_name': 'IBM BOB',
+                'name': 'grok',
+                'display_name': 'Grok',
                 'provider_type': 'llm',
-                'base_url': 'https://us-south.ml.cloud.ibm.com',
+                'base_url': 'https://api.x.ai/v1',
+                'is_enabled': 1,
+                'supports_streaming': 1,
+                'supports_function_calling': 1,
+                'max_tokens': 131072,
+                'default_model': 'grok-3',
+                'config_schema': json.dumps({
+                    'role': 'orchestrator',
+                    'api_key': {'type': 'string', 'required': True},
+                    'priority': {'type': 'number', 'default': 10},
+                })
+            },
+            {
+                'name': 'gemini-api',
+                'display_name': 'Gemini',
+                'provider_type': 'llm',
+                'base_url': 'https://generativelanguage.googleapis.com/v1beta',
+                'is_enabled': 1,
+                'supports_streaming': 1,
+                'supports_function_calling': 1,
+                'max_tokens': 1048576,
+                'default_model': 'gemini-2.5-pro',
+                'config_schema': json.dumps({
+                    'role': 'orchestrator',
+                    'api_key': {'type': 'string', 'required': True},
+                    'priority': {'type': 'number', 'default': 20},
+                })
+            },
+            {
+                'name': 'deepseek-api',
+                'display_name': 'DeepSeek',
+                'provider_type': 'llm',
+                'base_url': 'https://api.deepseek.com/v1',
                 'is_enabled': 1,
                 'supports_streaming': 1,
                 'supports_function_calling': 0,
-                'max_tokens': 8192,
-                'default_model': 'ibm/granite-13b-chat-v2',
+                'max_tokens': 65536,
+                'default_model': 'deepseek-chat',
                 'config_schema': json.dumps({
+                    'role': 'orchestrator',
                     'api_key': {'type': 'string', 'required': True},
-                    'project_id': {'type': 'string', 'required': True}
+                    'priority': {'type': 'number', 'default': 30},
                 })
             },
             {
@@ -352,7 +391,7 @@ class DatabaseInitializer:
                 'supports_streaming': 1,
                 'supports_function_calling': 1,
                 'max_tokens': 200000,
-                'default_model': 'claude-sonnet-4-6',
+                'default_model': 'claude-3-5-sonnet-latest',
                 'config_schema': json.dumps({'api_key': {'type': 'string', 'required': True}})
             },
             {
@@ -364,7 +403,7 @@ class DatabaseInitializer:
                 'supports_streaming': 1,
                 'supports_function_calling': 1,
                 'max_tokens': 1000000,
-                'default_model': 'gemini-3-pro',
+                'default_model': 'gemini-1.5-flash',
                 'config_schema': json.dumps({'api_key': {'type': 'string', 'required': True}})
             },
             {
@@ -376,7 +415,7 @@ class DatabaseInitializer:
                 'supports_streaming': 1,
                 'supports_function_calling': 1,
                 'max_tokens': 128000,
-                'default_model': 'gpt-codex-mini',
+                'default_model': 'gpt-4o-mini',
                 'config_schema': json.dumps({'api_key': {'type': 'string', 'required': True}})
             },
             {
@@ -388,7 +427,7 @@ class DatabaseInitializer:
                 'supports_streaming': 1,
                 'supports_function_calling': 0,
                 'max_tokens': 32000,
-                'default_model': 'copilot-chat',
+                'default_model': 'gpt-4o',
                 'config_schema': json.dumps({'token': {'type': 'string', 'required': True}})
             },
             {
@@ -400,7 +439,7 @@ class DatabaseInitializer:
                 'supports_streaming': 1,
                 'supports_function_calling': 1,
                 'max_tokens': 64000,
-                'default_model': 'deepseek-coder-v3',
+                'default_model': 'deepseek-coder',
                 'config_schema': json.dumps({'api_key': {'type': 'string', 'required': True}})
             },
             {
@@ -412,7 +451,7 @@ class DatabaseInitializer:
                 'supports_streaming': 1,
                 'supports_function_calling': 0,
                 'max_tokens': 128000,
-                'default_model': 'kimi-k2',
+                'default_model': 'moonshot-v1-8k',
                 'config_schema': json.dumps({'api_key': {'type': 'string', 'required': True}})
             },
             {
@@ -424,7 +463,7 @@ class DatabaseInitializer:
                 'supports_streaming': 1,
                 'supports_function_calling': 0,
                 'max_tokens': 128000,
-                'default_model': 'cline-claude',
+                'default_model': 'claude-3-5-sonnet-latest',
                 'config_schema': json.dumps({'api_key': {'type': 'string', 'required': True}})
             }
         ]
@@ -441,12 +480,30 @@ class DatabaseInitializer:
                     )
                     
                     if cursor.fetchone() is None:
+                        # Determine cost_per_token based on name (BIZ-08)
+                        cost_map = {
+                            'ollama': 0.0,
+                            'gemini': 0.000075,
+                            'google': 0.000075,
+                            'deepseek': 0.00015,
+                            'kimi': 0.0003,
+                            'openai': 0.0015,
+                            'grok': 0.002,
+                            'anthropic': 0.003,
+                            'claude': 0.003,
+                        }
+                        cost_val = 0.001  # Default fallback cost
+                        for key, val in cost_map.items():
+                            if key in provider['name'].lower():
+                                cost_val = val
+                                break
+
                         cursor.execute("""
                             INSERT INTO providers (
                                 name, display_name, provider_type, base_url,
                                 is_enabled, supports_streaming, supports_function_calling,
-                                max_tokens, default_model, config_schema
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                max_tokens, default_model, config_schema, cost_per_token
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, (
                             provider['name'],
                             provider['display_name'],
@@ -457,9 +514,10 @@ class DatabaseInitializer:
                             provider['supports_function_calling'],
                             provider.get('max_tokens'),
                             provider['default_model'],
-                            provider['config_schema']
+                            provider['config_schema'],
+                            cost_val
                         ))
-                        logger.info(f"Seeded provider: {provider['display_name']}")
+                        logger.info(f"Seeded provider: {provider['display_name']} with cost {cost_val}")
                 
                 logger.info("Default providers seeded successfully")
         except Exception as e:
@@ -549,10 +607,14 @@ class DatabaseInitializer:
                 )
                 if cur.fetchone():
                     return
-                # Prefer the IBM BOB / Granite provider as the default if it exists.
-                cur.execute("SELECT id FROM providers WHERE name = 'bob' LIMIT 1")
-                bob_row = cur.fetchone()
-                default_provider_id = int(bob_row[0]) if bob_row else None
+                # Prefer Grok as default orchestrator LLM if configured.
+                cur.execute("SELECT id FROM providers WHERE name = 'grok' LIMIT 1")
+                grok_row = cur.fetchone()
+                default_provider_id = int(grok_row[0]) if grok_row else None
+                if default_provider_id is None:
+                    cur.execute("SELECT id FROM providers WHERE name = 'gemini-api' LIMIT 1")
+                    gem_row = cur.fetchone()
+                    default_provider_id = int(gem_row[0]) if gem_row else None
                 cur.execute(
                     """
                     INSERT INTO orchestrator_config (
@@ -745,7 +807,7 @@ if __name__ == "__main__":
     """
     import argparse
     
-    parser = argparse.ArgumentParser(description="Initialize IBM Bob database")
+    parser = argparse.ArgumentParser(description="Initialize AI Orchestrator database")
     parser.add_argument(
         "--db-path",
         default="data/bob.db",
@@ -775,4 +837,3 @@ if __name__ == "__main__":
         for key, value in stats.items():
             print(f"{key}: {value}")
 
-# Made with Bob

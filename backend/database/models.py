@@ -1,5 +1,5 @@
 """
-Pydantic models for IBM Bob Backend System.
+Pydantic models for AI Orchestrator Backend System.
 Defines data models for all database entities and API request/response schemas.
 """
 
@@ -77,6 +77,7 @@ class RuntimeStatus(str, Enum):
     FAILED = "failed"
     KILLED = "killed"
     PAUSED = "paused"
+    PENDING = "pending"
 
 
 class LogType(str, Enum):
@@ -268,6 +269,7 @@ class ProviderCredential(ProviderCredentialBase, TimestampMixin):
     provider_id: int
     quota_used: int = 0
     quota_reset_at: Optional[datetime] = None
+    has_credentials: bool = True
     
     model_config = ConfigDict(from_attributes=True)
 
@@ -660,7 +662,7 @@ class ChatRequest(BaseModel):
     provider_id: Optional[int] = None
     model_name: Optional[str] = None
     stream: bool = True
-    context_files: Optional[List[int]] = None
+    context_files: Optional[List[str]] = None
     metadata: Optional[Dict[str, Any]] = None
 
 
@@ -721,4 +723,3 @@ class ErrorResponse(BaseModel):
     code: Optional[str] = None
     timestamp: datetime = Field(default_factory=utc_now)
 
-# Made with Bob

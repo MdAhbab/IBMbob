@@ -1,107 +1,123 @@
 # Quick Start Guide
 
-Get the AI CLI Orchestrator up and running in minutes.
+Get the **AI Orchestrator** (main app) up and running in minutes.
+
+> **Note:** The marketing/download site lives in [`downloader_page/`](../downloader_page/). This guide covers the orchestrator backend + frontend at the repo root.
 
 ---
 
 ## Prerequisites
 
-- **Node.js** 16+ and npm
-- **Python** 3.8+
+- **Python 3.8+**
+- **Node.js 16+** and npm
 - **Git** (optional)
 
 ---
 
 ## Installation
 
-### 1. Clone or Download
+### 1. Clone or download
 
 ```bash
 git clone <repository-url>
 cd IBMbob
 ```
 
-### 2. Install Dependencies
+### 2. Install dependencies
 
 ```bash
-# Frontend dependencies
-cd downloader_page
-npm install
+# Backend (creates backend/venv on first run via run.py)
+cd backend
+pip install -r requirements.txt
 
-# Backend dependencies
-pip install -r backend/requirements.txt
+# Frontend
+cd ../frontend
+npm install
+cd ..
 ```
 
 ---
 
-## Running the Application
+## Running the application
 
-### Option 1: Quick Start (Windows)
+### Recommended: unified launcher
+
+From the **repo root**:
 
 ```bash
-cd downloader_page
-start.bat
-```
-
-This will automatically open two terminal windows:
-- Frontend at http://localhost:5173
-- Backend at http://localhost:8000
-
-### Option 2: Manual Start (All Platforms)
-
-**Terminal 1 - Frontend:**
-```bash
-cd downloader_page
-npm run dev
-```
-
-**Terminal 2 - Backend:**
-```bash
-cd downloader_page/backend
 python run.py
 ```
 
+This starts both backend (FastAPI) and frontend (Vite dev server), creates `backend/venv` if needed, and initializes the database when requested.
+
+### Common options
+
+```bash
+# Backend only
+python run.py --backend-only
+
+# Frontend only
+python run.py --frontend-only
+
+# Initialize database, then start
+python run.py --init-db
+
+# Custom ports
+python run.py --port 8080 --frontend-port 3000
+```
+
 ---
 
-## Accessing the Application
+## Access points
 
-Once both servers are running:
+Once running:
 
-- **Frontend**: http://localhost:5173
-- **Backend API**: http://localhost:8000
-- **API Documentation**: http://localhost:8000/api/docs
+| Service | URL |
+|---------|-----|
+| Frontend UI | http://localhost:5173 |
+| Backend API | http://localhost:8000 |
+| Interactive API docs | http://localhost:8000/docs |
+| Health check | http://localhost:8000/health |
+
+Configure orchestrator LLM keys in **Settings → Providers** or copy `backend/.env.example` to `backend/.env`.
 
 ---
 
 ## Testing the API
 
-### Using curl
-
 ```bash
 # Health check
+curl http://localhost:8000/health
+
+# API-prefixed health (same payload)
 curl http://localhost:8000/api/health
 
-# Get version info
-curl http://localhost:8000/api/version
-
-# Get system status
-curl http://localhost:8000/api/status
+# List providers
+curl http://localhost:8000/api/providers
 ```
 
-### Using Browser
-
-Simply visit:
-- http://localhost:8000/api/health
-- http://localhost:8000/api/version
-- http://localhost:8000/api/docs (Interactive API documentation)
+Open http://localhost:8000/docs for the full interactive reference.
 
 ---
 
-## Common Issues
+## Downloader page (separate)
 
-### Port Already in Use
+To run the public download/marketing site:
 
-If port 8000 or 5173 is already in use:
+```bash
+cd downloader_page
+npm install
+npm run build
+npm run backend
+```
+
+See [`downloader_page/README.md`](../downloader_page/README.md) for details.
+
+---
+
+## Common issues
+
+### Port already in use
 
 **Windows:**
 ```bash
@@ -109,85 +125,27 @@ netstat -ano | findstr :8000
 taskkill /PID <PID> /F
 ```
 
-**Linux/Mac:**
+**Linux/macOS:**
 ```bash
 lsof -ti:8000 | xargs kill -9
 ```
 
-### Dependencies Not Installing
+### Database path
 
-```bash
-# Clear npm cache
-npm cache clean --force
-rm -rf node_modules
-npm install
+`run.py` reads `DATABASE_PATH` / `DATABASE_URL` from the environment or `backend/.env`. Default: `data/bob.db` at the repo root.
 
-# Reinstall Python packages
-pip install --upgrade pip
-pip install -r backend/requirements.txt
-```
+### Backend fails to import
 
-### Frontend Not Loading
-
-Build the frontend first:
-```bash
-cd downloader_page
-npm run build
-```
+Ensure you run commands from the **repo root** so `backend.main:app` resolves correctly.
 
 ---
 
-## Next Steps
+## Next steps
 
-1. **Explore the API**: Visit http://localhost:8000/api/docs
-2. **Read Documentation**: Check [`README.md`](../README.md)
-3. **Configure Environment**: Edit `.env` files for custom settings
-4. **Deploy**: See [`downloader_page/DEPLOYMENT.md`](../downloader_page/DEPLOYMENT.md)
-
----
-
-## Development Workflow
-
-### Frontend Development
-
-```bash
-cd downloader_page
-npm run dev
-# Hot reload enabled - changes reflect immediately
-```
-
-### Backend Development
-
-```bash
-cd downloader_page/backend
-python run.py
-# Auto-reload enabled - changes reflect immediately
-```
-
-### Production Build
-
-```bash
-cd downloader_page
-npm run build
-npm run backend
-# Access at http://localhost:8000
-```
+1. Read [API.md](API.md) for REST and WebSocket endpoints
+2. Read [ARCHITECTURE.md](ARCHITECTURE.md) for system design
+3. Build installers: [release/installer/README.md](../release/installer/README.md)
 
 ---
 
-## Stopping the Application
-
-Press `Ctrl+C` in each terminal window to stop the servers.
-
----
-
-## Getting Help
-
-- **Documentation**: [`README.md`](../README.md)
-- **API Reference**: [`docs/API.md`](API.md)
-- **Project Structure**: [`docs/PROJECT_STRUCTURE.md`](PROJECT_STRUCTURE.md)
-- **Deployment Guide**: [`downloader_page/DEPLOYMENT.md`](../downloader_page/DEPLOYMENT.md)
-
----
-
-Last Updated: 2026-05-16
+Last Updated: 2026-05-27

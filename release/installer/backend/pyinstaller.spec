@@ -7,18 +7,18 @@ Packages the FastAPI backend with embedded Python runtime
 import sys
 from pathlib import Path
 
-# Get paths
+# release/installer/backend -> parents[3] is repo root
 spec_root = Path(SPECPATH)
-project_root = spec_root.parent.parent
+project_root = spec_root.resolve().parents[3]
 backend_dir = project_root / 'backend'
 frontend_dist = project_root / 'frontend' / 'dist'
 workspace_templates = spec_root.parent / 'workspace'
 
 block_cipher = None
 
-# Collect all backend files
+# Bundle the full backend package (not legacy backend/app/)
 backend_datas = [
-    (str(backend_dir / 'app'), 'app'),
+    (str(backend_dir), 'backend'),
 ]
 
 # Add frontend if it exists
@@ -29,11 +29,12 @@ else:
 
 # Add workspace templates
 if workspace_templates.exists():
-    backend_datas.append((str(workspace_templates / '*.template'), 'workspace'))
+    for template in workspace_templates.glob('*.template'):
+        backend_datas.append((str(template), 'workspace'))
 
 a = Analysis(
     ['main.py'],
-    pathex=[str(backend_dir)],
+    pathex=[str(project_root)],
     binaries=[],
     datas=backend_datas,
     hiddenimports=[
@@ -50,7 +51,7 @@ a = Analysis(
         'uvicorn.protocols.websockets.wsproto_impl',
         'uvicorn.lifespan',
         'uvicorn.lifespan.on',
-        
+
         # FastAPI dependencies
         'fastapi',
         'fastapi.staticfiles',
@@ -60,21 +61,28 @@ a = Analysis(
         'starlette.middleware.cors',
         'pydantic',
         'pydantic.json',
-        
+
         # Additional dependencies
         'yaml',
         'json',
         'asyncio',
         'websockets',
-        
-        # App modules (adjust based on your structure)
-        'app',
-        'app.main',
-        'app.api',
-        'app.models',
-        'app.services',
-        'app.utils',
-        'app.cli_wrappers',
+        'aiosqlite',
+        'cryptography',
+
+        # Backend package
+        'backend',
+        'backend.main',
+        'backend.config',
+        'backend.api',
+        'backend.api.routes',
+        'backend.api.websockets',
+        'backend.api.websockets.terminals',
+        'backend.database',
+        'backend.database.init_db',
+        'backend.database.models',
+        'backend.services',
+        'backend.utils',
     ],
     hookspath=[],
     hooksconfig={},

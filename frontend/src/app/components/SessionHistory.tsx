@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import {
   ChevronDown,
@@ -8,10 +8,14 @@ import {
   Coins,
   FileText,
   Loader2,
+  Pause,
   Search,
   Trash2,
 } from "lucide-react";
 import { useStore, type SessionEntry } from "./store";
+import { apiFetch } from "../lib/api";
+import { SESSIONS_CHANGED } from "../lib/sessionsBus";
+import { fetchSessionEntries } from "../lib/loadSessions";
 
 const fmtDate = (t: number) => {
   const d = new Date(t);
@@ -25,12 +29,20 @@ const fmtDate = (t: number) => {
 };
 
 const fmtDuration = (s: SessionEntry) => {
-  if (!s.endedAt) return "active";
+  if (!s.endedAt) return s.status === "paused" ? "paused" : "active";
   const ms = s.endedAt - s.startedAt;
   const m = Math.round(ms / 60000);
   if (m < 60) return `${m}m`;
   return `${Math.floor(m / 60)}h ${m % 60}m`;
 };
+
+function mapSessionStatus(raw: string): SessionEntry["status"] {
+  if (raw === "completed") return "completed";
+  if (raw === "failed") return "failed";
+  if (raw === "paused") return "paused";
+  if (raw === "archived") return "archived";
+  return "active";
+}
 
 const StatusBadge = ({ s }: { s: SessionEntry["status"] }) => {
   const map = {
@@ -46,6 +58,14 @@ const StatusBadge = ({ s }: { s: SessionEntry["status"] }) => {
       cls: "border-indigo-300/40 bg-indigo-50 text-indigo-700 dark:border-indigo-400/20 dark:bg-indigo-400/10 dark:text-indigo-300",
       Icon: Loader2,
     },
+    paused: {
+      cls: "border-amber-300/40 bg-amber-50 text-amber-700 dark:border-amber-400/20 dark:bg-amber-400/10 dark:text-amber-300",
+      Icon: Pause,
+    },
+    archived: {
+      cls: "border-zinc-300/40 bg-zinc-50 text-zinc-600 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-400",
+      Icon: CircleX,
+    },
   }[s];
   return (
     <span
@@ -58,15 +78,92 @@ const StatusBadge = ({ s }: { s: SessionEntry["status"] }) => {
 };
 
 export function SessionHistory() {
-  const { sessions, clearSessions } = useStore();
+  const { clearSessions } = useStore();
+  const [sessions, setSessions] = useState<SessionEntry[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
   const [q, setQ] = useState("");
   const [openId, setOpenId] = useState<string | null>(null);
+  const [details, setDetails] = useState<Record<string, { summary: string; artifacts: string[] }>>(
+    {},
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const mapped = await fetchSessionEntries(50);
+        setSessions(mapped);
+      } catch (err) {
+        console.warn("SessionHistory load failed", err);
+      } finally {
+        if (!cancelled) {
+          setIsLoading(false);
+        }
+      }
+    };
+    void load();
+    const id = window.setInterval(load, 20000);
+    const onRefresh = () => void load();
+    window.addEventListener(SESSIONS_CHANGED, onRefresh);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+      window.removeEventListener(SESSIONS_CHANGED, onRefresh);
+    };
+  }, []);
+
+  const loadDetails = async (sessionId: string) => {
+    if (details[sessionId]) return;
+    try {
+      const res = await apiFetch(`/sessions/${sessionId}/messages`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const messages = data.messages ?? [];
+      const lastAssistant = [...messages].reverse().find((m: any) => m.role !== "user");
+      let summary = "";
+      let artifacts: string[] = [];
+      if (lastAssistant) {
+        summary = String(lastAssistant.content ?? "").slice(0, 400);
+        let meta = lastAssistant.metadata;
+        if (meta && typeof meta === "string") {
+          try {
+            meta = JSON.parse(meta);
+          } catch {
+            meta = {};
+          }
+        }
+        artifacts = (meta?.artifacts ?? []).map((a: any) => a.name ?? String(a));
+      }
+      setDetails((prev) => ({ ...prev, [sessionId]: { summary, artifacts } }));
+    } catch (err) {
+      console.warn("Failed to load session messages", err);
+    }
+  };
 
   const filtered = sessions.filter(
     (s) =>
       s.prompt.toLowerCase().includes(q.toLowerCase()) ||
-      s.agents.some((a) => a.toLowerCase().includes(q.toLowerCase()))
+      s.agents.some((a) => a.toLowerCase().includes(q.toLowerCase())),
   );
+
+  if (isLoading) {
+    return (
+      <div className="space-y-2 animate-pulse">
+        {Array.from({ length: 3 }).map((_, i) => (
+          <div
+            key={i}
+            className="flex items-center gap-3 rounded-xl border border-zinc-200/70 bg-white/60 p-3 dark:border-white/[0.06] dark:bg-zinc-950/40"
+          >
+            <div className="h-4 w-12 rounded bg-zinc-200 dark:bg-white/[0.06]" />
+            <div className="flex-1 space-y-1.5">
+              <div className="h-3.5 w-2/3 rounded bg-zinc-200 dark:bg-white/[0.06]" />
+              <div className="h-2.5 w-1/2 rounded bg-zinc-200 dark:bg-white/[0.06]" />
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  }
 
   if (sessions.length === 0) {
     return (
@@ -94,7 +191,9 @@ export function SessionHistory() {
         </div>
         <button
           onClick={() => {
-            if (confirm("Clear all session history?")) clearSessions();
+            if (confirm("Clear all session history?")) {
+              void clearSessions().then(() => setSessions([]));
+            }
           }}
           className="flex items-center gap-1 rounded-md border border-zinc-200/70 bg-white px-2 py-1.5 text-[11px] text-zinc-600 hover:bg-zinc-50 dark:border-white/[0.07] dark:bg-white/[0.02] dark:text-zinc-300 dark:hover:bg-white/[0.06]"
         >
@@ -105,13 +204,18 @@ export function SessionHistory() {
       <div className="space-y-1.5">
         {filtered.map((s) => {
           const open = openId === s.id;
+          const detail = details[s.id];
           return (
             <div
               key={s.id}
               className="overflow-hidden rounded-xl border border-zinc-200/70 bg-white/60 dark:border-white/[0.06] dark:bg-zinc-950/40"
             >
               <button
-                onClick={() => setOpenId(open ? null : s.id)}
+                onClick={() => {
+                  const next = open ? null : s.id;
+                  setOpenId(next);
+                  if (next) void loadDetails(next);
+                }}
                 className="flex w-full items-center gap-3 px-3 py-2.5 text-left"
               >
                 <StatusBadge s={s.status} />
@@ -131,16 +235,6 @@ export function SessionHistory() {
                     <span>{(s.tokens / 1000).toFixed(1)}k tok</span>
                   </div>
                 </div>
-                <div className="hidden items-center gap-1 sm:flex">
-                  {s.agents.slice(0, 4).map((a) => (
-                    <span
-                      key={a}
-                      className="rounded-md border border-zinc-200/70 bg-zinc-50 px-1.5 py-0.5 font-mono text-[9px] text-zinc-600 dark:border-white/[0.07] dark:bg-white/[0.04] dark:text-zinc-300"
-                    >
-                      {a}
-                    </span>
-                  ))}
-                </div>
                 <ChevronDown
                   className={`h-3.5 w-3.5 shrink-0 text-zinc-400 transition ${open ? "rotate-180" : ""}`}
                 />
@@ -158,15 +252,17 @@ export function SessionHistory() {
                         <div className="mb-1 font-mono text-[9px] uppercase tracking-[0.2em] text-zinc-500">
                           Summary
                         </div>
-                        <p className="leading-relaxed">{s.summary}</p>
+                        <p className="leading-relaxed">
+                          {detail?.summary || s.summary || "Loading…"}
+                        </p>
                       </div>
-                      {s.artifacts.length > 0 && (
+                      {(detail?.artifacts ?? s.artifacts).length > 0 && (
                         <div>
                           <div className="mb-1 font-mono text-[9px] uppercase tracking-[0.2em] text-zinc-500">
                             Artifacts
                           </div>
                           <div className="flex flex-wrap gap-1.5">
-                            {s.artifacts.map((a) => (
+                            {(detail?.artifacts ?? s.artifacts).map((a) => (
                               <span
                                 key={a}
                                 className="inline-flex items-center gap-1 rounded-md border border-indigo-200/70 bg-indigo-50 px-1.5 py-0.5 font-mono text-[10px] text-indigo-700 dark:border-indigo-400/20 dark:bg-indigo-400/10 dark:text-indigo-300"

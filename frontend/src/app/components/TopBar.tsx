@@ -12,7 +12,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { useTheme } from "./theme";
 import { useStore } from "./store";
-import { apiPath } from "../lib/api";
+import { apiFetch } from "../lib/api";
 
 type View = "chat" | "processes" | "settings";
 
@@ -48,11 +48,11 @@ export function TopBar({
     let c = false;
     const load = async () => {
       try {
-        const r = await fetch(apiPath("/workspace/git"));
+        const r = await apiFetch("/workspace/git", { timeoutMs: 12_000 });
         if (r.ok && !c) setGit(await r.json());
       } catch {}
       try {
-        const r2 = await fetch(apiPath("/analytics/events/recent?limit=15"));
+        const r2 = await apiFetch("/analytics/events/recent?limit=15", { timeoutMs: 12_000 });
         if (r2.ok && !c) setNotifs(await r2.json());
       } catch {}
     };

@@ -5,4 +5,3 @@ Contains all API routes and endpoints.
 
 __version__ = "1.0.0"
 
-# Made with Bob

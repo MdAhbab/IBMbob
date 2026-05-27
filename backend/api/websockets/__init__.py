@@ -1,14 +1,8 @@
 """
 WebSocket package for real-time communication.
-
-This package provides WebSocket endpoints for:
-- Runtime status updates
-- Orchestrator routing and task updates
-- Chat message streaming
 """
 
-from .manager import ConnectionManager
+from .manager import ConnectionManager, connection_manager
+from .terminals import router as terminals_router
 
-__all__ = ["ConnectionManager"]
-
-# Made with Bob
+__all__ = ["ConnectionManager", "connection_manager", "terminals_router"]

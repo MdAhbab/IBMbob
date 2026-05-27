@@ -1,5 +1,5 @@
 """
-Database package for IBM Bob Backend System.
+Database package for AI Orchestrator Backend System.
 Provides database initialization, models, and utilities.
 """
 
@@ -182,4 +182,3 @@ __all__ = [
 
 __version__ = "1.0.0"
 
-# Made with Bob

@@ -1,24 +1,5 @@
 """
 WebSocket endpoint for real-time PTY terminal streaming.
-
-Wire protocol (JSON messages):
-
-  Client -> Server:
-    {type: "input", data: "ls\r"}
-    {type: "resize", cols: 120, rows: 30}
-    {type: "ask", prompt: "explain this file", model?: "ibm/granite-13b-chat-v2"}
-    {type: "kill"}
-    {type: "ping"}
-
-  Server -> Client:
-    {type: "hello", runtime_id, status, pid?, provider_name}
-    {type: "output", data: "..."}
-    {type: "status", state: "running"|"paused"|"exited"|"killed"|"failed", exit_code?}
-    {type: "ask.token", text: "..."}
-    {type: "ask.done"}
-    {type: "ask.error", error: "..."}
-    {type: "error", error: "..."}
-    {type: "pong"}
 """
 
 from __future__ import annotations
@@ -26,23 +7,63 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+import aiosqlite
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 
+from backend.api.dependencies import get_db, verify_runtime_owned_by_user, get_current_user_id
+from backend.config import settings
 from backend.services.pty_service import pty_manager
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+# Track pending WS send tasks per connection (MED-019)
+_pending_sends: Dict[int, Set[asyncio.Task]] = {}
 
 
 def _safe_json(payload: Dict[str, Any]) -> str:
     return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
 
 
+async def _verify_ws_runtime(
+    websocket: WebSocket,
+    runtime_id: int,
+    db: aiosqlite.Connection,
+) -> bool:
+    """Authenticate WebSocket and verify runtime ownership (HIGH-001)."""
+    token = websocket.query_params.get("token")
+    user_id = await get_current_user_id()
+    if not pty_manager.verify_ws_token(runtime_id, token):
+        await websocket.accept()
+        await websocket.send_text(
+            _safe_json({"type": "error", "error": "Invalid, expired, or missing WebSocket token"})
+        )
+        await websocket.close(code=4403)
+        return False
+    try:
+        await verify_runtime_owned_by_user(runtime_id, user_id, db)
+    except Exception:
+        await websocket.accept()
+        await websocket.send_text(
+            _safe_json({"type": "error", "error": "Runtime access denied"})
+        )
+        await websocket.close(code=4403)
+        return False
+    return True
+
+
 @router.websocket("/ws/terminals/{runtime_id}")
-async def terminal_socket(websocket: WebSocket, runtime_id: int) -> None:
+async def terminal_socket(
+    websocket: WebSocket,
+    runtime_id: int,
+    db: aiosqlite.Connection = Depends(get_db),
+) -> None:
     """Bi-directional bridge between an xterm.js client and a backend PtySession."""
+
+    if not await _verify_ws_runtime(websocket, runtime_id, db):
+        return
 
     await websocket.accept()
 
@@ -54,10 +75,11 @@ async def terminal_socket(websocket: WebSocket, runtime_id: int) -> None:
         await websocket.close(code=4404)
         return
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     pty_manager.bind_loop(loop)
+    conn_key = id(websocket)
+    _pending_sends[conn_key] = set()
 
-    # Send hello + replay buffered output so the user immediately sees state.
     await websocket.send_text(
         _safe_json(
             {
@@ -73,73 +95,71 @@ async def terminal_socket(websocket: WebSocket, runtime_id: int) -> None:
     if history:
         await websocket.send_text(_safe_json({"type": "output", "data": history}))
 
-    # PTY output -> websocket. The reader thread invokes this from a worker
-    # thread, so we schedule the send onto the FastAPI loop.
+    async def safe_send(payload: Dict[str, Any]) -> None:
+        try:
+            await websocket.send_text(_safe_json(payload))
+        except Exception:
+            pass
+
     def on_chunk(chunk: str) -> None:
         if not chunk:
             return
         try:
-            loop.call_soon_threadsafe(
-                lambda: asyncio.ensure_future(
-                    websocket.send_text(_safe_json({"type": "output", "data": chunk}))
-                )
+            task = asyncio.run_coroutine_threadsafe(
+                safe_send({"type": "output", "data": chunk}),
+                loop
             )
+            pending = _pending_sends.get(conn_key)
+            if pending is not None:
+                pending.add(task)
+                task.add_done_callback(lambda t: pending.discard(t))
         except RuntimeError:
-            # Loop closing or detached
             pass
 
     session.attach(on_chunk)
 
-    # Watson is loaded lazily; surface a single error if keys missing.
     async def handle_ask(prompt: str, model: Optional[str]) -> None:
+        """Stream LLM answer using DB credentials from Settings (HIGH-018)."""
         try:
-            from backend.services.ibm_watson_service import IBM_WATSON_AVAILABLE
-            from backend.config import settings as wx_settings
+            from backend.services.orchestrator.core import get_orchestrator_engine
+            from backend.services.providers.base import ChatMessage, CompletionRequest
+            from backend.services.providers.registry import get_provider_registry
 
-            if not IBM_WATSON_AVAILABLE:
-                await websocket.send_text(
-                    _safe_json(
-                        {"type": "ask.error", "error": "IBM Watsonx SDK not installed"}
-                    )
-                )
-                return
-            if not wx_settings.watsonx_api_key or not wx_settings.watsonx_project_id:
-                await websocket.send_text(
-                    _safe_json(
-                        {
-                            "type": "ask.error",
-                            "error": "Watsonx credentials missing (WATSONX_API_KEY / WATSONX_PROJECT_ID)",
-                        }
-                    )
-                )
-                return
-            from backend.services.ibm_watson_service import WatsonxService
-
-            watsonx = WatsonxService()
-            model_id = model or "ibm/granite-13b-chat-v2"
-
-            def _next_chunk(gen):
+            user_id = await get_current_user_id()
+            engine = get_orchestrator_engine()
+            configs = await engine.load_llm_configs(db, user_id)
+            registry = get_provider_registry()
+            messages = [ChatMessage(role="user", content=prompt)]
+            last_err: Optional[str] = None
+            for cfg in configs:
+                impl = registry.get(cfg.provider_id)
+                if not impl or not impl.is_configured(cfg):
+                    continue
                 try:
-                    return next(gen)
-                except StopIteration:
-                    return None
-
-            stream_iter = iter(watsonx.generate_text_stream(prompt=prompt, model_id=model_id))
-            while True:
-                chunk = await asyncio.to_thread(_next_chunk, stream_iter)
-                if chunk is None:
-                    break
-                text = chunk if isinstance(chunk, str) else str(chunk)
-                if text:
-                    await websocket.send_text(
-                        _safe_json({"type": "ask.token", "text": text})
-                    )
-            await websocket.send_text(_safe_json({"type": "ask.done"}))
+                    async for token in impl.stream(
+                        cfg,
+                        CompletionRequest(
+                            messages=messages,
+                            model=model or cfg.default_model,
+                            stream=True,
+                        ),
+                    ):
+                        if token:
+                            await safe_send({"type": "ask.token", "text": token})
+                    await safe_send({"type": "ask.done"})
+                    return
+                except Exception as e:
+                    last_err = str(e)
+                    continue
+            await safe_send(
+                {
+                    "type": "ask.error",
+                    "error": last_err or "No orchestrator LLM keys configured",
+                }
+            )
         except Exception as e:
             logger.exception("ask failed")
-            await websocket.send_text(
-                _safe_json({"type": "ask.error", "error": str(e)})
-            )
+            await safe_send({"type": "ask.error", "error": str(e)})
 
     try:
         while True:
@@ -164,18 +184,41 @@ async def terminal_socket(websocket: WebSocket, runtime_id: int) -> None:
                     asyncio.create_task(handle_ask(prompt, model))
             elif t == "kill":
                 session.kill()
-                await websocket.send_text(
-                    _safe_json({"type": "status", "state": "killed"})
-                )
+                await safe_send({"type": "status", "state": "killed"})
             elif t == "ping":
-                await websocket.send_text(_safe_json({"type": "pong"}))
+                await safe_send({"type": "pong"})
             else:
-                await websocket.send_text(
-                    _safe_json({"type": "error", "error": f"unknown type: {t}"})
-                )
+                await safe_send({"type": "error", "error": f"unknown type: {t}"})
     except WebSocketDisconnect:
         pass
     except Exception as e:
         logger.warning(f"terminal ws closed: {e}")
     finally:
         session.detach(on_chunk)
+        if session.status == "exited" and session.provider_id is not None:
+            try:
+                from backend.api.routes.orchestrator import update_division_status_for_provider
+
+                ws_user_id = await get_current_user_id()
+                cur = await db.execute(
+                    "SELECT name FROM providers WHERE id = ?",
+                    (session.provider_id,),
+                )
+                row = await cur.fetchone()
+                if row:
+                    slug = str(row["name"])
+                    await update_division_status_for_provider(
+                        db, ws_user_id, slug, "done"
+                    )
+                    await safe_send(
+                        {
+                            "type": "division.status",
+                            "short": slug,
+                            "status": "done",
+                        }
+                    )
+            except Exception:
+                logger.debug("division status update skipped", exc_info=True)
+        pending = _pending_sends.pop(conn_key, set())
+        for task in pending:
+            task.cancel()

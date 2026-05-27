@@ -12,6 +12,7 @@ export function VoiceButton({ onTranscript, onPartial }: Props) {
   const [supported, setSupported] = useState(true);
   const [partial, setPartial] = useState("");
   const recRef = useRef<any>(null);
+  const partialRef = useRef("");
   const startedAt = useRef<number>(0);
   const [duration, setDuration] = useState(0);
 
@@ -68,12 +69,15 @@ export function VoiceButton({ onTranscript, onPartial }: Props) {
         else interim += t;
       }
       const text = (final + " " + interim).trim();
+      partialRef.current = text;
       setPartial(text);
       onPartial?.(text);
     };
     rec.onend = () => {
       setRecording(false);
-      if (partial.trim()) onTranscript(partial.trim());
+      const transcript = partialRef.current.trim();
+      if (transcript) onTranscript(transcript);
+      partialRef.current = "";
       setPartial("");
     };
     rec.onerror = () => setRecording(false);
@@ -93,11 +97,13 @@ export function VoiceButton({ onTranscript, onPartial }: Props) {
     <>
       <button
         type="button"
-        title={supported ? "Voice dictation (⌘ ⇧ V)" : "Voice (demo mode)"}
-        onClick={recording ? stop : start}
+        title={supported ? "Voice dictation (⌘ ⇧ V)" : "Voice dictation not supported in this browser"}
+        onClick={supported ? (recording ? stop : start) : undefined}
         className={`relative flex h-9 w-9 items-center justify-center rounded-lg border transition ${
           recording
             ? "border-rose-400/60 bg-rose-500 text-white shadow-[0_0_18px_-3px_rgba(244,63,94,0.7)]"
+            : !supported
+            ? "border-zinc-200/50 bg-zinc-50/40 text-zinc-400 cursor-not-allowed dark:border-white/[0.04] dark:bg-white/[0.01] dark:text-zinc-500"
             : "border-zinc-200/70 bg-white text-zinc-600 hover:bg-zinc-50 dark:border-white/[0.06] dark:bg-white/[0.02] dark:text-zinc-300 dark:hover:bg-white/[0.05]"
         }`}
       >

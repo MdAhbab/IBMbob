@@ -161,13 +161,14 @@ def validate_file_size(
     return True
 
 
-def validate_url(url: str, require_https: bool = False) -> bool:
+def validate_url(url: str, require_https: bool = False, allow_localhost: bool = True) -> bool:
     """
     Validate URL format and optionally require HTTPS.
 
     Args:
         url: URL to validate
         require_https: If True, only accept HTTPS URLs
+        allow_localhost: If False, reject localhost and loopback IP addresses
 
     Returns:
         True if valid, False otherwise
@@ -201,11 +202,15 @@ def validate_url(url: str, require_https: bool = False) -> bool:
         if not parsed.netloc:
             return False
 
-        # Block localhost/private IPs in production if needed
-        # This is a basic check; more sophisticated checks may be needed
-        if parsed.netloc.startswith("127.") or parsed.netloc == "localhost":
-            # Allow in development, but you might want to restrict in production
-            pass
+        # Block localhost/private IPs if requested
+        if not allow_localhost:
+            netloc_lower = parsed.netloc.lower().split(":")[0]
+            if (
+                netloc_lower == "localhost"
+                or netloc_lower.startswith("127.")
+                or netloc_lower == "::1"
+            ):
+                return False
 
         return True
 
@@ -340,22 +345,17 @@ def validate_port_number(port: int) -> bool:
     return 1 <= port <= 65535
 
 
-def validate_path(path: str, must_exist: bool = False) -> bool:
+def validate_path(path: str, base_path: Optional[str] = None, must_exist: bool = False) -> bool:
     """
-    Validate file system path.
+    Validate file system path and prevent directory traversal.
 
     Args:
         path: Path to validate
+        base_path: Optional directory to anchor the path under (avoids traversal)
         must_exist: If True, path must exist on filesystem
 
     Returns:
         True if valid, False otherwise
-
-    Example:
-        >>> validate_path("/tmp/test.txt")
-        True
-        >>> validate_path("/tmp/test.txt", must_exist=True)
-        False  # Unless file exists
     """
     if not path or not isinstance(path, str):
         return False
@@ -363,12 +363,18 @@ def validate_path(path: str, must_exist: bool = False) -> bool:
     try:
         path_obj = Path(path)
 
-        # Check for path traversal attempts
-        if ".." in path:
-            return False
-
         if must_exist and not path_obj.exists():
             return False
+
+        # Resolve to absolute path, handling all symlinks and ".." segments
+        resolved_path = path_obj.resolve()
+
+        if base_path:
+            resolved_base = Path(base_path).resolve()
+            try:
+                resolved_path.relative_to(resolved_base)
+            except ValueError:
+                return False
 
         return True
 
@@ -378,19 +384,13 @@ def validate_path(path: str, must_exist: bool = False) -> bool:
 
 def sanitize_filename(filename: str) -> str:
     """
-    Sanitize filename by removing dangerous characters.
+    Sanitize filename by removing dangerous characters while preserving dotfiles.
 
     Args:
         filename: Original filename
 
     Returns:
         Sanitized filename
-
-    Example:
-        >>> sanitize_filename("my file (1).txt")
-        'my_file_1.txt'
-        >>> sanitize_filename("../../etc/passwd")
-        'etc_passwd'
     """
     if not filename:
         return "unnamed"
@@ -401,13 +401,21 @@ def sanitize_filename(filename: str) -> str:
     # Replace dangerous characters
     filename = re.sub(r'[<>:"/\\|?*]', "_", filename)
 
-    # Remove leading/trailing dots and spaces
-    filename = filename.strip(". ")
+    filename_stripped = filename.strip()
 
-    # Ensure we have something left
+    if filename_stripped.startswith("."):
+        # Check if it consists only of dots (e.g. ".", "..", "...")
+        if all(c == "." for c in filename_stripped):
+            return "unnamed"
+        rest = filename_stripped[1:].strip(". ")
+        if not rest:
+            return "unnamed"
+        filename = "." + rest
+    else:
+        filename = filename_stripped.strip(". ")
+
     if not filename:
         return "unnamed"
 
     return filename
 
-# Made with Bob

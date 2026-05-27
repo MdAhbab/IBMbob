@@ -1,199 +1,135 @@
 # AI CLI Orchestrator - Installer
 
-This directory contains all the components needed to build production-ready installers for the AI CLI Orchestrator.
+Build production-ready installers for the AI Orchestrator main app.
 
-## 📁 Directory Structure
+> **Primary Windows pipeline:** `windows/setup.iss`  
+> `windows/installer.iss` is deprecated (legacy IBM Bob paths).
+
+## Directory structure
 
 ```
-installer/
-├── backend/          # Backend packaging with PyInstaller
-├── windows/          # Windows installer (Inno Setup)
-├── macos/           # macOS installer (DMG)
-├── bootstrapper/    # CLI dependency manager
-├── workspace/       # Workspace templates
-├── scripts/         # Build automation scripts
-├── dist/           # Build output (gitignored)
-└── version.json    # Version configuration
+release/installer/
+├── backend/          # PyInstaller packaging (bundles repo backend/)
+├── windows/          # Inno Setup (setup.iss)
+├── macos/            # DMG creation (create_dmg.sh)
+├── bootstrapper/     # CLI dependency manager
+├── launcher/         # Windows tray launcher
+├── workspace/        # Workspace templates
+├── dist/             # Build output (gitignored)
+└── version.json      # Version configuration
 ```
 
-## 🚀 Quick Start
+## Quick start
 
 ### Prerequisites
 
-**For Windows builds:**
+**Windows builds:**
 - Python 3.11+
 - PyInstaller: `pip install pyinstaller`
-- Inno Setup 6.x: Download from https://jrsoftware.org/isdl.php
+- Inno Setup 6.x: https://jrsoftware.org/isdl.php
+- Place `icon.ico` in `windows/` before running Inno Setup
 
-**For macOS builds:**
+**macOS builds:**
 - Python 3.11+
-- PyInstaller: `pip install pyinstaller`
+- PyInstaller
 - Xcode Command Line Tools: `xcode-select --install`
 
-**For both:**
-- Node.js 18+ and npm (for CLI bootstrapping)
-- All backend dependencies: `pip install -r ../backend/requirements.txt`
+**Both:**
+- Node.js 18+ (CLI bootstrapping)
+- Main backend deps: `pip install -r ../../backend/requirements.txt`
+- Installer build deps: `pip install -r backend/requirements.txt`
 
-### Building Installers
+### Build commands
 
-#### Build All Components
 ```bash
-# From installer directory
+# From release/installer/
 python build.py
-```
 
-#### Build Backend Only
-```bash
+# Backend executable only
 cd backend
 python build_backend.py
-```
 
-#### Build Windows Installer
-```bash
-cd windows
+# Windows installer (after backend build)
+cd ../windows
 python build_windows.py
+
+# macOS DMG
+cd ../macos
+bash create_dmg.sh
 ```
 
-#### Build macOS Installer
+## What gets built
+
+| Artifact | Path |
+|----------|------|
+| Backend exe | `backend/dist/orchestrator-backend.exe` |
+| Windows installer | `dist/windows/orchestrator-setup.exe` |
+| macOS DMG | `dist/macos/` (via `create_dmg.sh`) |
+
+PyInstaller resolves the **repo root** (`parents[3]` from `backend/build_backend.py`) and bundles `backend/` with entrypoint `backend.main:app`.
+
+## Component notes
+
+### Backend packaging
+
+- Spec: `backend/pyinstaller.spec`
+- Packaged launcher: `backend/main.py` imports `backend.main:app`
+- Requirements synced from `../../backend/requirements.txt`
+
+### Windows installer
+
+- Use **`windows/setup.iss`** (license: `../../../LICENSE` at repo root)
+- Legacy `installer.iss` kept with deprecation comment only
+
+### macOS
+
+- Script name: **`macos/create_dmg.sh`** (not `build_macos.sh`)
+
+### CLI bootstrapper
+
+Edit `bootstrapper/cli_registry.json` to add or update AI CLI install definitions.
+
+## Testing
+
 ```bash
-cd macos
-bash build_macos.sh
-```
-
-## 📦 What Gets Built
-
-### Backend Executable
-- **Windows**: `orchestrator-backend.exe` (~40-50MB)
-- **macOS**: `orchestrator-backend.app` (~40-50MB)
-- **Contains**: Python runtime, FastAPI, React frontend, all dependencies
-
-### Platform Installers
-- **Windows**: `orchestrator-setup.exe` (~50-60MB)
-- **macOS**: `orchestrator-setup.dmg` (~50-60MB)
-
-## 🔧 Component Details
-
-### Backend Packaging
-The backend is packaged using PyInstaller with:
-- Embedded Python 3.11 runtime
-- FastAPI application and dependencies
-- React frontend static files
-- Workspace templates
-- CLI bootstrapper
-
-### Windows Installer
-Uses Inno Setup to create a professional Windows installer with:
-- System requirements checking
-- Desktop shortcut creation
-- Start menu integration
-- Uninstaller
-- UAC elevation when needed
-
-### macOS Installer
-Creates a DMG with:
-- Drag-to-Applications interface
-- App bundle structure
-- Code signing ready
-- Notarization ready
-
-### CLI Bootstrapper
-Smart dependency manager that:
-- Downloads AI CLI tools on first run
-- Handles network failures gracefully
-- Shows real-time progress
-- Falls back to manual instructions
-
-## 🧪 Testing
-
-### Test Backend Executable
-```bash
+# Test packaged backend
 cd backend/dist
-./orchestrator-backend  # or orchestrator-backend.exe on Windows
+./orchestrator-backend.exe   # Windows
+./orchestrator-backend       # Linux/macOS binary
+
+# Test Windows installer
+cd ../dist/windows
+./orchestrator-setup.exe
 ```
 
-### Test Installer
+## Troubleshooting
+
 ```bash
-# Windows
-cd dist/windows
-orchestrator-setup.exe
-
-# macOS
-cd dist/macos
-open orchestrator-setup.dmg
-```
-
-## 📝 Configuration
-
-### Version Management
-Edit `version.json` to update:
-- Version number
-- Release date
-- Build number
-- Release notes
-
-### CLI Registry
-Edit `bootstrapper/cli_registry.json` to:
-- Add new AI CLIs
-- Update install commands
-- Change priorities
-- Mark as required/optional
-
-### Workspace Templates
-Edit files in `workspace/` to customize:
-- Default workspace configuration
-- Skill template
-- Plan template
-
-## 🐛 Troubleshooting
-
-### PyInstaller Issues
-```bash
-# Clean build
+# Clean PyInstaller output
 rm -rf backend/build backend/dist
-python build_backend.py
+python backend/build_backend.py
+
+# Reinstall deps
+pip install -r ../../backend/requirements.txt
+pip install -r backend/requirements.txt
 ```
 
-### Missing Dependencies
-```bash
-# Reinstall all dependencies
-pip install -r ../backend/requirements.txt
-pip install pyinstaller
-```
+## Related paths
 
-### Inno Setup Not Found
-- Download from https://jrsoftware.org/isdl.php
-- Add to PATH or specify full path in build script
+| Resource | Location |
+|----------|----------|
+| Main backend source | `../../backend/` |
+| Main frontend source | `../../frontend/` |
+| Downloader site | `../../downloader_page/` |
+| Shared workspace | `../../shared/` |
+| Architecture plan | `../../docs/ARCHITECTURE.md` |
 
-## 📚 Documentation
+## Documentation
 
-- **Installation Guide**: See `docs/INSTALLATION.md`
-- **Build Guide**: See `docs/BUILD_GUIDE.md`
-- **Architecture**: See `../INSTALLER_PLAN.md`
-- **Summary**: See `../INSTALLER_SUMMARY.md`
-
-## 🔗 Related Files
-
-- Backend source: `../backend/`
-- Frontend source: `../frontend/`
-- Downloader page: `../downloader_page/`
-- Shared resources: `../shared/`
-
-## 📞 Support
-
-For issues or questions:
-1. Check the troubleshooting section above
-2. Review the detailed plan in `../INSTALLER_PLAN.md`
-3. Check existing issues on GitHub
-4. Create a new issue with details
-
-## 🎯 Next Steps
-
-1. Install prerequisites
-2. Run `python build.py` to build all components
-3. Test the installer on a clean VM
-4. Deploy to download server
-5. Update downloader page with links
+- [docs/QUICK_START.md](../../docs/QUICK_START.md) — run from source
+- [docs/PROJECT_STRUCTURE.md](../../docs/PROJECT_STRUCTURE.md) — repo layout
+- [composer_report.md](../../composer_report.md) — audit findings (installer section)
 
 ---
 
-**Ready to build production-ready installers!** 🚀
+Last Updated: 2026-05-27

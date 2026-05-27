@@ -17,7 +17,8 @@ if sys.platform == 'win32':
 class BackendBuilder:
     def __init__(self):
         self.script_dir = Path(__file__).parent
-        self.project_root = self.script_dir.parent.parent
+        # release/installer/backend -> parents[3] is repo root
+        self.project_root = self.script_dir.resolve().parents[3]
         self.backend_dir = self.project_root / 'backend'
         self.frontend_dist = self.project_root / 'frontend' / 'dist'
         self.dist_dir = self.script_dir / 'dist'
@@ -45,12 +46,12 @@ class BackendBuilder:
             return False
         print(f"  ✓ Backend found: {self.backend_dir}")
         
-        # Check if backend has app module
-        app_dir = self.backend_dir / 'app'
-        if not app_dir.exists():
-            print(f"  ✗ Backend app module not found: {app_dir}")
+        # Check if backend entry module exists
+        main_module = self.backend_dir / 'main.py'
+        if not main_module.is_file():
+            print(f"  ✗ Backend entry module not found: {main_module}")
             return False
-        print(f"  ✓ Backend app module found")
+        print(f"  ✓ Backend entry module found: backend.main")
         
         # Check if PyInstaller is installed
         try:

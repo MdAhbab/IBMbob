@@ -26,7 +26,8 @@ clis:
   # Rate limit settings (requests per day)
   rate_limits:
     claude-code: 1000
-    ibm-bob: 500
+    grok: 500
+    orchestrator: 500
     gemini-cli: 2000
     copilot-cli: 1500
     codex-cli: 1000
@@ -43,11 +44,11 @@ routing:
   # Task routing preferences
   specialties:
     frontend: ["gemini-cli", "claude-code", "cline"]
-    backend: ["codex-cli", "ibm-bob", "deepseek"]
+    backend: ["codex-cli", "orchestrator", "deepseek"]
     algorithm: ["codex-cli", "deepseek", "claude-code"]
-    refactoring: ["claude-code", "copilot-cli", "ibm-bob"]
+    refactoring: ["claude-code", "copilot-cli", "orchestrator"]
     documentation: ["claude-code", "gemini-cli"]
-    general: ["claude-code", "gemini-cli", "ibm-bob"]
+    general: ["claude-code", "gemini-cli", "orchestrator"]
   
   # Routing strategy
   strategy: "specialty_first"  # Options: specialty_first, round_robin, least_used

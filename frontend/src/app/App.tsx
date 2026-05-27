@@ -1,24 +1,36 @@
-import { Component, useEffect, useState, type ReactNode } from "react";
+import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { BrowserRouter, Route, Routes } from "react-router";
 import { AnimatePresence, motion } from "motion/react";
 import { Loader } from "./components/Loader";
 import { Sidebar } from "./components/Sidebar";
 import { TopBar } from "./components/TopBar";
 import { ChatView, INITIAL_MSGS, type Division, type Msg } from "./components/ChatView";
 import { ProcessesView } from "./components/ProcessesView";
+import { Toaster } from "./components/ui/sonner";
 import { ThemeProvider } from "./components/theme";
 import { StoreProvider, useStore } from "./components/store";
 import { Onboarding } from "./components/Onboarding";
 import { Settings } from "./components/Settings";
 import { CommandPalette } from "./components/CommandPalette";
 import { GlobalChatBar } from "./components/GlobalChatBar";
+import { TerminalFullscreen } from "./components/TerminalFullscreen";
 import { type CliRuntime } from "./components/TerminalCard";
 import { type CtxFile } from "./components/ContextDropzone";
-import { apiFetch, apiPath, isAbortError } from "./lib/api";
+import { apiFetch, apiPath, healthCheckUrl, isAbortError, readSseJsonStream } from "./lib/api";
+import { routingStrategyToBackend } from "./lib/orchestratorConfig";
 import { parseApiError } from "./lib/apiErrors";
 import {
   mapSharedFilesToCtx,
   type SharedContextResponse,
 } from "./lib/workspaceContext";
+import { trackAnalyticsEvent } from "./lib/analyticsClient";
+import { notifyUser } from "./lib/notifications";
+import {
+  loadLastSessionId,
+  notifySessionsChanged,
+  saveLastSessionId,
+  SESSIONS_CHANGED,
+} from "./lib/sessionsBus";
 
 type View = "chat" | "processes" | "settings";
 
@@ -34,7 +46,7 @@ const PROVIDER_LOOK: Record<string, { glyph: string; color: string; accent: stri
   copilot:  { glyph: "❍", color: "text-zinc-500 dark:text-zinc-300", accent: "linear-gradient(to right,#a1a1aa,#71717a)" },
   kimi:     { glyph: "✺", color: "text-rose-500",    accent: "linear-gradient(to right,#f43f5e,#ec4899)" },
   cline:    { glyph: "◈", color: "text-cyan-500",    accent: "linear-gradient(to right,#06b6d4,#0ea5e9)" },
-  bob:      { glyph: "∎", color: "text-blue-500",    accent: "linear-gradient(to right,#3b82f6,#6366f1)" },
+  grok:     { glyph: "𝕏", color: "text-red-500",     accent: "linear-gradient(to right,#ef4444,#f97316)" },
 };
 
 function providerLook(id: string) {
@@ -47,38 +59,90 @@ function providerLook(id: string) {
   );
 }
 
+const ORCHESTRATOR_LLM_NAMES = new Set(["grok", "gemini-api", "deepseek-api"]);
+const INFRA_LLM_NAMES = new Set(["openai", "anthropic", "google", "ollama", "bob"]);
+
+function isCliAgentProvider(p: {
+  is_enabled?: boolean | number;
+  provider_type?: string;
+  name?: string;
+  config_schema?: { role?: string } | null;
+}) {
+  if (!p.is_enabled || p.provider_type !== "llm") return false;
+  if (p.config_schema?.role === "orchestrator") return false;
+  if (p.name && ORCHESTRATOR_LLM_NAMES.has(p.name)) return false;
+  if (p.name && INFRA_LLM_NAMES.has(p.name)) return false;
+  return true;
+}
+
 function applyDivisionsToAgents(clis: CliRuntime[], divisions: Division[]): CliRuntime[] {
   if (!divisions.length) return clis;
+
+  const bySlug = new Map<string, Division[]>();
+  for (const division of divisions) {
+    const key = division.short.toLowerCase();
+    const bucket = bySlug.get(key) ?? [];
+    bucket.push(division);
+    bySlug.set(key, bucket);
+  }
+
   return clis.map((cli) => {
-    const division = divisions.find(
-      (d) =>
-        d.short === cli.id ||
-        d.agent.toLowerCase() === cli.name.toLowerCase()
-    );
-    if (!division) return { ...cli, task: undefined, state: cli.runtimeId ? "executing" : "idle" };
+    const slug = cli.id.toLowerCase();
+    let matched =
+      bySlug.get(slug) ??
+      divisions.filter(
+        (d) =>
+          d.short.toLowerCase() === slug ||
+          d.agent.toLowerCase() === cli.name.toLowerCase() ||
+          d.agent.toLowerCase().includes(slug),
+      );
+
+    if (!matched.length) {
+      return cli;
+    }
+
+    const task = matched.map((d) => d.task).join(" · ");
+    const allDone = matched.every((d) => d.status === "done");
     return {
       ...cli,
-      task: division.task,
-      state: division.status === "done" ? "idle" : "executing",
+      task,
+      state: allDone ? "idle" : "executing",
     };
   });
 }
 
 function Shell() {
-  const { onboarded, setOnboarded, providers: prefProviders } = useStore();
+  const { onboarded, backendHydrated, setOnboarded, orchestrator, providers: prefProviders, createSession, prefs } =
+    useStore();
+  const prefProvidersRef = useRef(prefProviders);
+  useEffect(() => {
+    prefProvidersRef.current = prefProviders;
+  }, [prefProviders]);
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState<View>("chat");
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [clis, setClis] = useState<CliRuntime[]>([]);
   const [msgs, setMsgs] = useState<Msg[]>(INITIAL_MSGS);
   const [chatInput, setChatInput] = useState("");
-  const [sidebarOpen, setSidebarOpen] = useState(false); // mobile drawer
+  const [chatSending, setChatSending] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [activeSessionId, setActiveSessionId] = useState<number | null>(null);
   const [ctxFiles, setCtxFiles] = useState<CtxFile[]>([]);
+  const [contextFilePaths, setContextFilePaths] = useState<string[]>([]);
+  const chatAbortRef = useRef<AbortController | null>(null);
+  const chatSessionRef = useRef<number | null>(null);
+  const processesRef = useRef<HTMLDivElement | null>(null);
+  const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const [providerDegraded, setProviderDegraded] = useState(false);
+  const [highlightAgentId, setHighlightAgentId] = useState<string | null>(null);
+  const enabledAgentIds = useMemo(
+    () => new Set(clis.map((c) => c.id.toLowerCase())),
+    [clis],
+  );
 
   async function loadMessagesForSession(sid: number) {
     try {
-      const msgRes = await fetch(apiPath(`/sessions/${sid}/messages`));
+      const msgRes = await apiFetch(`/sessions/${sid}/messages`, { timeoutMs: 8000 });
       if (!msgRes.ok) return;
       const msgData = await msgRes.json();
       const raw = msgData.messages ?? [];
@@ -117,12 +181,19 @@ function Shell() {
   useEffect(() => {
     const initSession = async () => {
       try {
-        const res = await fetch(apiPath("/sessions?limit=1"));
+        const preferred = loadLastSessionId();
+        if (preferred != null) {
+          setActiveSessionId(preferred);
+          await loadMessagesForSession(preferred);
+          return;
+        }
+        const res = await apiFetch("/sessions?limit=1&sort_by=created_at&sort_order=desc");
         if (res.ok) {
           const data = await res.json();
           if (data.sessions && data.sessions.length > 0) {
             const sid = data.sessions[0].id;
             setActiveSessionId(sid);
+            saveLastSessionId(sid);
             await loadMessagesForSession(sid);
           }
         }
@@ -135,27 +206,131 @@ function Shell() {
 
   const send = async (text: string) => {
     const v = text.trim();
-    if (!v) return;
+    if (!v || chatSending) return;
     if (view !== "chat") setView("chat");
     const ts = new Date().toTimeString().slice(0, 5);
     const userMsg: Msg = { id: `u${Date.now()}`, role: "user", content: v, ts };
+    const sessionAtSend = activeSessionId;
+    chatSessionRef.current = sessionAtSend;
     setMsgs((m) => [...m, userMsg]);
     setChatInput("");
+    setChatSending(true);
+
+    chatAbortRef.current?.abort();
+    const controller = new AbortController();
+    chatAbortRef.current = controller;
+
     try {
       const res = await apiFetch("/orchestrator/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          session_id: activeSessionId,
-          message: v
+          session_id: sessionAtSend,
+          message: v,
+          model_name: orchestrator.model,
+          stream: true,
+          context_files: contextFilePaths.length ? contextFilePaths : undefined,
         }),
-        timeoutMs: 60_000,
+        timeoutMs: 120_000,
+        signal: controller.signal,
       });
-      if (res.ok) {
+      if (controller.signal.aborted) return;
+      if (chatSessionRef.current !== sessionAtSend && sessionAtSend != null) return;
+
+      const isStream =
+        res.ok &&
+        (res.headers.get("content-type")?.includes("text/event-stream") ?? false);
+
+      if (res.ok && isStream) {
+        const streamMsgId = `stream-${Date.now()}`;
+        setMsgs((m) => [
+          ...m,
+          {
+            id: streamMsgId,
+            role: "orchestrator",
+            ts: new Date().toTimeString().slice(0, 5),
+            content: "",
+            thinking: [],
+            divisions: [],
+            artifacts: [],
+          },
+        ]);
+
+        let finalSessionId = sessionAtSend;
+        let finalMetadata: Record<string, unknown> = {};
+        let finalMessageId = streamMsgId;
+        let tokensUsed = 0;
+
+        await readSseJsonStream(res, (event) => {
+          if (event.type === "start" && typeof event.session_id === "number") {
+            finalSessionId = event.session_id;
+            if (!activeSessionId) {
+              setActiveSessionId(event.session_id);
+              chatSessionRef.current = event.session_id;
+              saveLastSessionId(event.session_id);
+            }
+          } else if (event.type === "token" && typeof event.content === "string") {
+            setMsgs((m) =>
+              m.map((row) =>
+                row.id === streamMsgId
+                  ? { ...row, content: row.content + event.content }
+                  : row,
+              ),
+            );
+          } else if (event.type === "done") {
+            if (typeof event.session_id === "number") finalSessionId = event.session_id;
+            if (typeof event.message_id === "number") finalMessageId = String(event.message_id);
+            if (typeof event.tokens_used === "number") tokensUsed = event.tokens_used;
+            if (event.metadata && typeof event.metadata === "object") {
+              finalMetadata = event.metadata as Record<string, unknown>;
+            }
+          }
+        });
+
+        notifySessionsChanged();
+        const meta = finalMetadata as {
+          thinking?: string[];
+          divisions?: Division[];
+          artifacts?: Msg["artifacts"];
+          model?: string;
+        };
+        const divisions = (meta.divisions || []) as Division[];
+        setMsgs((m) =>
+          m.map((row) =>
+            row.id === streamMsgId
+              ? {
+                  ...row,
+                  id: finalMessageId,
+                  thinking: meta.thinking || [],
+                  divisions,
+                  artifacts: meta.artifacts || [],
+                  model: meta.model,
+                }
+              : row,
+          ),
+        );
+        if (divisions.length > 0) {
+          setClis((prev) => applyDivisionsToAgents(prev, divisions));
+          setView("processes");
+          requestAnimationFrame(() => {
+            processesRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+          });
+        }
+        void trackAnalyticsEvent("message_received", {
+          sessionId: finalSessionId,
+          tokensUsed,
+        });
+        if (divisions.length > 0) {
+          notifyUser("Orchestrator", "Task plan ready — agents dispatched.", prefs);
+        }
+      } else if (res.ok) {
         const data = await res.json();
         if (!activeSessionId) {
           setActiveSessionId(data.session_id);
+          chatSessionRef.current = data.session_id;
+          saveLastSessionId(data.session_id);
         }
+        notifySessionsChanged();
         const reply: Msg = {
           id: data.message_id.toString(),
           role: "orchestrator",
@@ -170,8 +345,18 @@ function Shell() {
         if (divisions.length > 0) {
           setClis((prev) => applyDivisionsToAgents(prev, divisions));
           setView("processes");
+          requestAnimationFrame(() => {
+            processesRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+          });
         }
         setMsgs((m) => [...m, reply]);
+        void trackAnalyticsEvent("message_received", {
+          sessionId: data.session_id,
+          tokensUsed: data.tokens_used,
+        });
+        if (divisions.length > 0) {
+          notifyUser("Orchestrator", "Task plan ready — agents dispatched.", prefs);
+        }
       } else {
         const detail = await parseApiError(res);
         const errReply: Msg = {
@@ -181,10 +366,16 @@ function Shell() {
           content: `Orchestrator error: ${detail}`,
         };
         setMsgs((m) => [...m, errReply]);
+        setChatInput(v);
+        void trackAnalyticsEvent("error_occurred", {
+          sessionId: sessionAtSend,
+          metadata: { detail },
+        });
       }
     } catch (err) {
+      if (isAbortError(err)) return;
       console.error("Failed to send message:", err);
-      const timedOut = isAbortError(err);
+      const timedOut = err instanceof DOMException && err.name === "TimeoutError";
       const errReply: Msg = {
         id: `err-${Date.now()}`,
         role: "orchestrator",
@@ -194,7 +385,36 @@ function Shell() {
           : "Network error: Failed to reach the backend. Is `python run.py` running?",
       };
       setMsgs((m) => [...m, errReply]);
+      setChatInput(v);
+    } finally {
+      setChatSending(false);
     }
+  };
+
+  const handleReroute = async (msg: Msg) => {
+    if (!msg.divisions?.length) return;
+    const strategy = routingStrategyToBackend(orchestrator.routingStrategy);
+    for (const div of msg.divisions) {
+      try {
+        await apiFetch("/orchestrator/dispatch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            task: div.task,
+            session_id: activeSessionId,
+            routing_strategy: strategy,
+          }),
+        });
+        void trackAnalyticsEvent("task_dispatched", {
+          sessionId: activeSessionId,
+          metadata: { division: div.short, strategy },
+        });
+      } catch (err) {
+        console.warn("Re-route dispatch failed:", err);
+      }
+    }
+    setClis((prev) => applyDivisionsToAgents(prev, msg.divisions!));
+    setView("processes");
   };
 
   useEffect(() => {
@@ -206,36 +426,106 @@ function Shell() {
       } else if (mod && e.key === ",") {
         e.preventDefault();
         setView("settings");
+      } else if (mod && e.shiftKey && e.key.toLowerCase() === "n") {
+        e.preventDefault();
+        void (async () => {
+          const sid = await createSession();
+          if (sid == null) return;
+          setActiveSessionId(sid);
+          saveLastSessionId(sid);
+          setMsgs([]);
+          setChatInput("");
+          setView("chat");
+          notifySessionsChanged();
+        })();
       } else if (mod && e.shiftKey && e.key.toLowerCase() === "p") {
         e.preventDefault();
         setView((v) => (v === "processes" ? "chat" : "processes"));
+      } else if (mod && e.key === "/") {
+        e.preventDefault();
+        chatInputRef.current?.focus();
+      } else if (e.key === "Escape") {
+        setPaletteOpen(false);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [createSession]);
 
   useEffect(() => {
-    const t = setTimeout(() => setLoading(false), 1300);
-    return () => clearTimeout(t);
-  }, []);
+    const onDivision = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { short?: string; status?: string };
+      if (!detail?.short) return;
+      const slug = detail.short.toLowerCase();
+      setMsgs((prev) =>
+        prev.map((m) =>
+          m.divisions?.length
+            ? {
+                ...m,
+                divisions: m.divisions.map((d) =>
+                  d.short.toLowerCase() === slug ||
+                  slug.includes(d.short.toLowerCase()) ||
+                  d.short.toLowerCase().includes(slug)
+                    ? { ...d, status: (detail.status as Division["status"]) ?? "done" }
+                    : d,
+                ),
+              }
+            : m,
+        ),
+      );
+      setClis((prev) =>
+        prev.map((c) =>
+          c.id.toLowerCase() === slug ? { ...c, state: "idle", task: undefined } : c,
+        ),
+      );
+      if (detail.status === "done") {
+        notifyUser("Agent finished", `${detail.short} completed its task.`, prefs);
+      }
+    };
+    window.addEventListener("orch:division-status", onDivision);
+    return () => window.removeEventListener("orch:division-status", onDivision);
+  }, [prefs]);
+
+  useEffect(() => {
+    if (!backendHydrated) return;
+    let cancelled = false;
+    const boot = async () => {
+      try {
+        const res = await apiFetch(healthCheckUrl(), { cache: "no-store" });
+        if (!res.ok) throw new Error("health check failed");
+      } catch {
+        /* still dismiss loader after hydration */
+      }
+      if (!cancelled) setLoading(false);
+    };
+    void boot();
+    return () => {
+      cancelled = true;
+    };
+  }, [backendHydrated]);
 
   // Load the providers the user enabled during onboarding from the backend,
   // then build CliRuntime[] for the Parallel Terminals page.
   useEffect(() => {
+    if (!onboarded) return;
     let cancelled = false;
     const load = async () => {
       try {
-        const provRes = await fetch(apiPath("/providers?enabled_only=true"));
+        const provRes = await apiFetch("/providers?enabled_only=true");
         const activeRes = await apiFetch("/runtimes/live").catch((err) => {
           console.warn("Failed to load live runtimes:", err);
           return null;
         });
-        const usageRes = await fetch(apiPath("/analytics/usage?days=1")).catch((err) => {
+        const usageRes = await apiFetch("/analytics/usage?days=1").catch((err) => {
           console.warn("Failed to load usage analytics:", err);
           return null;
         });
         if (cancelled) return;
+        if (!provRes.ok) {
+          setProviderDegraded(true);
+          return;
+        }
+        setProviderDegraded(false);
         const provJson = provRes.ok ? await provRes.json() : { providers: [] };
         const activeJson = activeRes?.ok ? await activeRes.json() : { runtimes: [] };
         const usageJson = usageRes && usageRes.ok ? await usageRes.json() : null;
@@ -246,22 +536,33 @@ function Shell() {
         }
         const costByProvider = new Map<string, number>();
         if (usageJson?.providers) {
+          for (const p of provJson.providers ?? []) {
+            const info =
+              usageJson.providers[p.name] ??
+              usageJson.providers[p.display_name];
+            if (info) {
+              costByProvider.set(p.name, Number(info?.cost ?? 0));
+            }
+          }
           for (const [name, info] of Object.entries<any>(usageJson.providers)) {
-            costByProvider.set(name, Number(info?.cost ?? 0));
+            if (!costByProvider.has(name)) {
+              costByProvider.set(name, Number(info?.cost ?? 0));
+            }
           }
         }
 
         const next: CliRuntime[] = (provJson.providers ?? [])
-          .filter((p: any) => p.is_enabled && p.provider_type === "llm")
+          .filter((p: any) => isCliAgentProvider(p))
           .map((p: any) => {
             const look = providerLook(p.name);
             const liveRuntime = activeByProvider.get(p.id);
             const cap =
-              prefProviders.find((pr) => pr.id === p.name)?.dailyCap ?? 20;
+              prefProvidersRef.current.find((pr) => pr.id === p.name)?.dailyCap ?? 20;
             return {
               id: p.name,
               providerId: p.id,
               runtimeId: liveRuntime?.runtime_id,
+              wsUrl: liveRuntime?.ws_url,
               name: p.display_name,
               glyph: look.glyph,
               color: look.color,
@@ -270,7 +571,7 @@ function Shell() {
               models: p.default_model ? [p.default_model] : [],
               authMethod: "api_key" as const,
               state: liveRuntime ? "executing" : "idle",
-              used: costByProvider.get(p.display_name) ?? 0,
+              used: costByProvider.get(p.name) ?? costByProvider.get(p.display_name) ?? 0,
               cap,
             };
           });
@@ -287,22 +588,22 @@ function Shell() {
         );
       } catch (err) {
         console.error("Failed to load enabled providers:", err);
-        setClis([]);
+        if (!cancelled) setProviderDegraded(true);
       }
     };
     void load();
     const interval = window.setInterval(() => {
       void load();
-    }, 10000);
+    }, 15000);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [onboarded, prefProviders]);
+  }, [onboarded]);
 
   const loadSharedContext = async () => {
     try {
-      const res = await fetch(apiPath("/workspace/shared"), { cache: "no-store" });
+      const res = await apiFetch("/workspace/shared", { cache: "no-store" });
       if (!res.ok) return;
       const data = (await res.json()) as SharedContextResponse;
       const agentCount = Math.max(1, clis.length);
@@ -319,7 +620,7 @@ function Shell() {
 
   const activeAgents = clis.filter((c) => c.runtimeId != null).length;
 
-  if (!loading && !onboarded) {
+  if (backendHydrated && !loading && !onboarded) {
     return (
       <div className="relative h-screen w-full overflow-hidden bg-[#fafafa] font-sans text-zinc-900 antialiased dark:bg-[#070709] dark:text-zinc-100">
         <Onboarding onDone={() => setOnboarded(true)} />
@@ -331,7 +632,7 @@ function Shell() {
 
   return (
     <div className="relative h-screen w-full overflow-hidden bg-[#fafafa] font-sans text-zinc-900 antialiased dark:bg-[#070709] dark:text-zinc-100">
-      <Loader visible={loading} />
+      <Loader visible={loading || !backendHydrated} />
 
       <div
         className="pointer-events-none absolute inset-0 opacity-60 dark:opacity-[0.4]"
@@ -365,7 +666,9 @@ function Shell() {
           onCloseMobile={() => setSidebarOpen(false)}
           onSelectSession={(sid) => {
             setActiveSessionId(sid);
+            saveLastSessionId(sid);
             setView("chat");
+            setChatInput("");
             void loadMessagesForSession(sid);
           }}
         />
@@ -377,6 +680,12 @@ function Shell() {
             onOpenPalette={() => setPaletteOpen(true)}
             onToggleSidebar={() => setSidebarOpen((o) => !o)}
           />
+
+          {providerDegraded && (
+            <div className="border-b border-amber-300/40 bg-amber-50 px-4 py-1.5 text-center font-mono text-[10px] text-amber-800 dark:border-amber-400/20 dark:bg-amber-400/10 dark:text-amber-200">
+              Provider sync degraded — showing last-known agent cards. Retrying in background…
+            </div>
+          )}
 
           <div className="relative min-h-0 flex-1 overflow-hidden">
             <AnimatePresence mode="wait">
@@ -392,7 +701,16 @@ function Shell() {
                   <ChatView
                     msgs={msgs}
                     onSuggest={(t) => send(t)}
-                    onOpenProcesses={() => setView("processes")}
+                    onOpenProcesses={(divisions) => {
+                      const first = divisions?.[0]?.short;
+                      if (first) setHighlightAgentId(first.toLowerCase());
+                      setView("processes");
+                      requestAnimationFrame(() => {
+                        processesRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+                      });
+                    }}
+                    onReroute={handleReroute}
+                    enabledAgentIds={enabledAgentIds}
                   />
                 </motion.div>
               )}
@@ -406,7 +724,10 @@ function Shell() {
                   className="absolute inset-0"
                 >
                   <ProcessesView
+                    ref={processesRef}
                     clis={clis}
+                    parallelism={orchestrator.parallelism}
+                    highlightAgentId={highlightAgentId}
                     files={ctxFiles}
                     setFiles={setCtxFiles}
                     onResyncShared={() => void loadSharedContext()}
@@ -444,6 +765,10 @@ function Shell() {
                 onVoice={(t) => send(t)}
                 onPartial={(t) => setChatInput(t)}
                 sessionId={activeSessionId}
+                disabled={chatSending}
+                onAttached={(paths) =>
+                  setContextFilePaths((prev) => [...new Set([...prev, ...paths])])
+                }
               />
             )}
           </div>
@@ -454,6 +779,16 @@ function Shell() {
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}
         onView={setView}
+        onNewChat={async () => {
+          const sid = await createSession();
+          if (sid == null) return;
+          setActiveSessionId(sid);
+          saveLastSessionId(sid);
+          setMsgs([]);
+          setChatInput("");
+          setView("chat");
+          notifySessionsChanged();
+        }}
       />
     </div>
   );
@@ -481,12 +816,14 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { err: Error | nu
             </pre>
             <button
               onClick={() => {
-                try {
-                  Object.keys(localStorage)
-                    .filter((k) => k.startsWith("orch."))
-                    .forEach((k) => localStorage.removeItem(k));
-                } catch {}
-                location.reload();
+                if (window.confirm("Are you sure you want to clear your local state and reload the application? All unsaved settings and history will be lost.")) {
+                  try {
+                    Object.keys(localStorage)
+                      .filter((k) => k.startsWith("orch."))
+                      .forEach((k) => localStorage.removeItem(k));
+                  } catch {}
+                  location.reload();
+                }
               }}
               className="mt-4 rounded-md bg-zinc-900 px-3 py-1.5 text-[12px] text-white dark:bg-white dark:text-zinc-900"
             >
@@ -505,7 +842,13 @@ export default function App() {
     <ErrorBoundary>
       <ThemeProvider>
         <StoreProvider>
-          <Shell />
+          <BrowserRouter>
+            <Routes>
+              <Route path="/terminal/:id" element={<TerminalFullscreen />} />
+              <Route path="/*" element={<Shell />} />
+            </Routes>
+          </BrowserRouter>
+          <Toaster richColors position="top-right" />
         </StoreProvider>
       </ThemeProvider>
     </ErrorBoundary>

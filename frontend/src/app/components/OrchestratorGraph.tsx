@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { Activity, Pause, Play, Send, Sparkles } from "lucide-react";
 import { OrchestratorLogo } from "./OrchestratorLogo";
+import { apiFetch } from "../lib/api";
 
 type Route = {
   id: string;
@@ -13,7 +14,7 @@ type Route = {
   confidence: number;
 };
 
-const ROUTES: Route[] = [
+const DEMO_ROUTES: Route[] = [
   { id: "r1", task: "Frontend hero section", target: "Gemini 3 Pro", short: "Gemini", color: "#6366f1", type: "ui", confidence: 96 },
   { id: "r2", task: "Backend auth refactor", target: "Claude Sonnet 4.6", short: "Claude", color: "#f59e0b", type: "logic", confidence: 94 },
   { id: "r3", task: "Schema migration", target: "Codex / gpt-codex", short: "Codex", color: "#10b981", type: "db", confidence: 91 },
@@ -22,35 +23,89 @@ const ROUTES: Route[] = [
   { id: "r6", task: "Doc translation", target: "Kimi K2", short: "Kimi", color: "#ec4899", type: "i18n", confidence: 90 },
 ];
 
+const ROUTE_COLORS = ["#6366f1", "#f59e0b", "#10b981", "#a855f7", "#64748b", "#ec4899"];
+
+function mapApiRoute(row: Record<string, unknown>, index: number): Route {
+  const provider = String(row.provider_name ?? "agent");
+  const short = provider.split(/\s+/)[0] ?? provider;
+  const reason = String(row.routing_reason ?? row.routing_strategy ?? "route");
+  return {
+    id: String(row.id ?? index),
+    task: reason,
+    target: provider,
+    short,
+    color: ROUTE_COLORS[index % ROUTE_COLORS.length],
+    type: String(row.routing_strategy ?? "task").slice(0, 8),
+    confidence: Math.min(99, 70 + (Number(row.latency_ms ?? 0) > 0 ? 10 : 0)),
+  };
+}
+
 export function OrchestratorGraph() {
+  const [routes, setRoutes] = useState<Route[]>(DEMO_ROUTES);
+  const [isDemo, setIsDemo] = useState(true);
   const [active, setActive] = useState(0);
   const [running, setRunning] = useState(true);
   const [logs, setLogs] = useState<string[]>([
-    "[00:00:01] orchestrator awake · custom-agent/granite-v2",
-    "[00:00:02] received master prompt (1,284 tokens)",
-    "[00:00:02] decomposed into 6 subtasks",
-    "[00:00:03] wrote divisions.md · 6 agents notified",
+    "[00:00:01] orchestrator awake",
+    "[00:00:02] waiting for routing history…",
   ]);
 
   useEffect(() => {
-    if (!running) return;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const res = await apiFetch("/analytics/routes?limit=12", { cache: "no-store" });
+        if (!res.ok) return;
+        const data = await res.json();
+        const rows = Array.isArray(data.routes) ? data.routes : [];
+        if (cancelled) return;
+        if (rows.length === 0) {
+          setRoutes(DEMO_ROUTES);
+          setIsDemo(true);
+          return;
+        }
+        setRoutes(rows.map((row: Record<string, unknown>, i: number) => mapApiRoute(row, i)));
+        setIsDemo(false);
+        setLogs(
+          rows.slice(0, 6).map((row: Record<string, unknown>) => {
+            const ts = String(row.created_at ?? "").slice(11, 19) || "00:00:00";
+            return `[${ts}] route → ${row.provider_name} (${row.routing_strategy})`;
+          }),
+        );
+      } catch {
+        if (!cancelled) {
+          setRoutes(DEMO_ROUTES);
+          setIsDemo(true);
+        }
+      }
+    };
+    void load();
+    const id = window.setInterval(load, 20000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!running || routes.length === 0) return;
     const id = setInterval(() => {
       setActive((a) => {
-        const next = (a + 1) % ROUTES.length;
-        const r = ROUTES[next];
+        const next = (a + 1) % routes.length;
+        const r = routes[next];
         const ts = new Date().toISOString().slice(11, 19);
         setLogs((prev) =>
           [
-            `[${ts}] route → ${r.target} (conf ${r.confidence}%)`,
+            `[${ts}] route → ${r.target} (${r.type})`,
             `[${ts}] dispatch "${r.task}"`,
             ...prev,
-          ].slice(0, 22)
+          ].slice(0, 22),
         );
         return next;
       });
     }, 2000);
     return () => clearInterval(id);
-  }, [running]);
+  }, [running, routes]);
 
   return (
     <div className="flex h-full flex-col overflow-hidden rounded-xl border border-zinc-200/70 bg-white/60 backdrop-blur dark:border-white/[0.07] dark:bg-gradient-to-br dark:from-zinc-950/80 dark:via-zinc-950/40 dark:to-indigo-950/20">
@@ -59,15 +114,15 @@ export function OrchestratorGraph() {
           <OrchestratorLogo size={28} className="drop-shadow-[0_0_10px_rgba(139,92,246,0.5)]" />
           <div className="leading-tight">
             <div className="bg-gradient-to-r from-indigo-400 via-violet-400 to-fuchsia-400 bg-clip-text text-[12.5px] text-transparent">
-              Orchestrator granite-3.2 (dev clone)
+              Orchestrator routing
             </div>
             <div className="font-mono text-[9.5px] text-zinc-500">
-              ibm-cloud · custom-agent · routing-v2
+              {isDemo ? "demo data · no routing history yet" : "live · /api/analytics/routes"}
             </div>
           </div>
           <span className="ml-2 inline-flex items-center gap-1 rounded-md border border-emerald-300/40 bg-emerald-50 px-1.5 py-0.5 font-mono text-[9px] text-emerald-700 dark:border-emerald-400/20 dark:bg-emerald-400/10 dark:text-emerald-300">
             <Activity className="h-2.5 w-2.5" />
-            live
+            {isDemo ? "demo" : "live"}
           </span>
         </div>
         <div className="flex items-center gap-1">
@@ -94,8 +149,8 @@ export function OrchestratorGraph() {
               </filter>
             </defs>
 
-            {ROUTES.map((r, i) => {
-              const angle = (i / ROUTES.length) * Math.PI * 2 - Math.PI / 2;
+            {routes.map((r, i) => {
+              const angle = (i / routes.length) * Math.PI * 2 - Math.PI / 2;
               const x = 210 + Math.cos(angle) * 150;
               const y = 160 + Math.sin(angle) * 110;
               const isActive = i === active;
@@ -189,17 +244,7 @@ export function OrchestratorGraph() {
               fontFamily="Geist Mono, monospace"
               className="fill-indigo-600 dark:fill-indigo-300"
             >
-              granite-3.2
-            </text>
-            <text
-              x={210}
-              y={177}
-              textAnchor="middle"
-              fontSize="7"
-              fontFamily="Geist Mono, monospace"
-              className="fill-zinc-500"
-            >
-              ibm-cloud
+              router
             </text>
           </svg>
 
@@ -215,15 +260,15 @@ export function OrchestratorGraph() {
                 <div className="flex min-w-0 items-center gap-1.5">
                   <Sparkles className="h-3 w-3 shrink-0 text-indigo-500" />
                   <span className="truncate text-zinc-700 dark:text-zinc-300">
-                    {ROUTES[active].task}
+                    {routes[active]?.task}
                   </span>
                   <span className="text-zinc-400">→</span>
-                  <span style={{ color: ROUTES[active].color }} className="font-semibold">
-                    {ROUTES[active].target}
+                  <span style={{ color: routes[active]?.color }} className="font-semibold">
+                    {routes[active]?.target}
                   </span>
                 </div>
                 <span className="shrink-0 rounded border border-zinc-200/70 px-1.5 py-0.5 text-[9px] text-zinc-500 dark:border-white/10">
-                  conf {ROUTES[active].confidence}%
+                  {isDemo ? "demo" : "live"}
                 </span>
               </motion.div>
             </AnimatePresence>
@@ -256,12 +301,21 @@ export function OrchestratorGraph() {
               if (!v) return;
               const ts = new Date().toISOString().slice(11, 19);
               setLogs((p) =>
-                [
-                  `[${ts}] master prompt accepted`,
-                  `[${ts}] "${v}"`,
-                  ...p,
-                ].slice(0, 22)
+                [`[${ts}] master prompt accepted`, `[${ts}] "${v}"`, ...p].slice(0, 22),
               );
+              void apiFetch("/orchestrator/dispatch", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ task: v }),
+              }).then((res) => {
+                const ts2 = new Date().toISOString().slice(11, 19);
+                setLogs((p) =>
+                  [
+                    `[${ts2}] dispatch ${res.ok ? "ok" : `failed (${res.status})`}`,
+                    ...p,
+                  ].slice(0, 22),
+                );
+              });
               (e.currentTarget as HTMLFormElement).reset();
             }}
             className="flex items-center gap-1.5 border-t border-zinc-200/70 bg-white/60 p-2 dark:border-white/[0.04] dark:bg-black/30"

@@ -104,10 +104,13 @@ async def get_cli_registry() -> CliRegistryResponse:
     )
 
     if not registry_path.exists():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"CLI registry not found at {registry_path}"
-        )
+        default_clis = [
+            {"slug": "claude-code", "name": "Claude Code", "required": False},
+            {"slug": "gemini-cli", "name": "Gemini CLI", "required": False},
+            {"slug": "codex-cli", "name": "Codex CLI", "required": False},
+            {"slug": "copilot-cli", "name": "Copilot CLI", "required": False},
+        ]
+        return CliRegistryResponse(clis=default_clis)
 
     try:
         raw = registry_path.read_text(encoding="utf-8")
@@ -488,4 +491,3 @@ async def delete_preference(
             detail=f"Preference '{preference_key}' not found"
         )
 
-# Made with Bob

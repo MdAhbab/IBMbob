@@ -7,11 +7,14 @@ Provides:
 - Standardized error response formatting
 """
 
+import logging
 from typing import Any, Dict, Optional
 from fastapi import Request, status
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -459,9 +462,6 @@ async def general_exception_handler(request: Request, exc: Exception) -> JSONRes
     request_id = getattr(request.state, "request_id", None)
 
     # Log the exception (logger should be configured)
-    import logging
-
-    logger = logging.getLogger(__name__)
     logger.exception(f"Unhandled exception: {exc}")
 
     return JSONResponse(
@@ -504,4 +504,3 @@ def register_exception_handlers(app) -> None:
     # Catch-all for unexpected exceptions
     app.add_exception_handler(Exception, general_exception_handler)
 
-# Made with Bob

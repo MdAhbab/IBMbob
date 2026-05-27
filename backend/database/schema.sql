@@ -1,4 +1,4 @@
--- SQLite Database Schema for IBM Bob Backend System
+-- SQLite Database Schema for AI Orchestrator Backend System
 -- Enable WAL mode for better concurrency
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS providers (
     max_tokens INTEGER,
     default_model TEXT,
     config_schema TEXT, -- JSON schema for provider-specific config
+    cost_per_token REAL DEFAULT 0.0,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -90,6 +91,8 @@ CREATE TABLE IF NOT EXISTS provider_credentials (
 CREATE INDEX idx_provider_credentials_user_id ON provider_credentials(user_id);
 CREATE INDEX idx_provider_credentials_provider_id ON provider_credentials(provider_id);
 CREATE INDEX idx_provider_credentials_is_active ON provider_credentials(is_active);
+CREATE INDEX idx_provider_credentials_user_active ON provider_credentials(user_id, is_active);
+
 
 -- ============================================================================
 -- SESSIONS AND MESSAGES
@@ -196,7 +199,7 @@ CREATE TABLE IF NOT EXISTS cli_runtimes (
     process_id INTEGER,                              -- OS pid; populated once PTY spawns
     command TEXT NOT NULL,
     working_directory TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'running' CHECK(status IN ('running', 'completed', 'failed', 'killed', 'paused')),
+    status TEXT NOT NULL DEFAULT 'running' CHECK(status IN ('running', 'completed', 'failed', 'killed', 'paused', 'pending')),
     exit_code INTEGER,
     started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     completed_at TIMESTAMP,
@@ -288,7 +291,7 @@ CREATE TABLE IF NOT EXISTS routing_history (
     session_id INTEGER NOT NULL,
     message_id INTEGER,
     orchestrator_config_id INTEGER,
-    selected_provider_id INTEGER NOT NULL,
+    selected_provider_id INTEGER,
     routing_reason TEXT,
     routing_strategy TEXT NOT NULL,
     latency_ms INTEGER,
@@ -300,7 +303,7 @@ CREATE TABLE IF NOT EXISTS routing_history (
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
     FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE SET NULL,
     FOREIGN KEY (orchestrator_config_id) REFERENCES orchestrator_config(id) ON DELETE SET NULL,
-    FOREIGN KEY (selected_provider_id) REFERENCES providers(id) ON DELETE CASCADE
+    FOREIGN KEY (selected_provider_id) REFERENCES providers(id) ON DELETE SET NULL
 );
 
 CREATE INDEX idx_routing_history_session_id ON routing_history(session_id);
@@ -356,6 +359,7 @@ CREATE INDEX idx_usage_analytics_session_id ON usage_analytics(session_id);
 CREATE INDEX idx_usage_analytics_provider_id ON usage_analytics(provider_id);
 CREATE INDEX idx_usage_analytics_event_type ON usage_analytics(event_type);
 CREATE INDEX idx_usage_analytics_created_at ON usage_analytics(created_at);
+CREATE INDEX idx_usage_analytics_user_created ON usage_analytics(user_id, created_at DESC);
 
 -- ============================================================================
 -- TRIGGERS FOR UPDATED_AT
@@ -365,6 +369,7 @@ CREATE INDEX idx_usage_analytics_created_at ON usage_analytics(created_at);
 CREATE TRIGGER IF NOT EXISTS update_users_timestamp 
 AFTER UPDATE ON users
 FOR EACH ROW
+WHEN NEW.updated_at IS OLD.updated_at
 BEGIN
     UPDATE users SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
 END;
@@ -373,6 +378,7 @@ END;
 CREATE TRIGGER IF NOT EXISTS update_workspaces_timestamp 
 AFTER UPDATE ON workspaces
 FOR EACH ROW
+WHEN NEW.updated_at IS OLD.updated_at
 BEGIN
     UPDATE workspaces SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
 END;
@@ -381,6 +387,7 @@ END;
 CREATE TRIGGER IF NOT EXISTS update_providers_timestamp 
 AFTER UPDATE ON providers
 FOR EACH ROW
+WHEN NEW.updated_at IS OLD.updated_at
 BEGIN
     UPDATE providers SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
 END;
@@ -389,6 +396,7 @@ END;
 CREATE TRIGGER IF NOT EXISTS update_provider_credentials_timestamp 
 AFTER UPDATE ON provider_credentials
 FOR EACH ROW
+WHEN NEW.updated_at IS OLD.updated_at
 BEGIN
     UPDATE provider_credentials SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
 END;
@@ -397,6 +405,7 @@ END;
 CREATE TRIGGER IF NOT EXISTS update_sessions_timestamp 
 AFTER UPDATE ON sessions
 FOR EACH ROW
+WHEN NEW.updated_at IS OLD.updated_at
 BEGIN
     UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
 END;
@@ -405,6 +414,7 @@ END;
 CREATE TRIGGER IF NOT EXISTS update_messages_timestamp 
 AFTER UPDATE ON messages
 FOR EACH ROW
+WHEN NEW.updated_at IS OLD.updated_at
 BEGIN
     UPDATE messages SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
 END;
@@ -413,6 +423,7 @@ END;
 CREATE TRIGGER IF NOT EXISTS update_orchestrator_config_timestamp 
 AFTER UPDATE ON orchestrator_config
 FOR EACH ROW
+WHEN NEW.updated_at IS OLD.updated_at
 BEGIN
     UPDATE orchestrator_config SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
 END;
@@ -421,8 +432,8 @@ END;
 CREATE TRIGGER IF NOT EXISTS update_user_preferences_timestamp 
 AFTER UPDATE ON user_preferences
 FOR EACH ROW
+WHEN NEW.updated_at IS OLD.updated_at
 BEGIN
     UPDATE user_preferences SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
 END;
 
--- Made with Bob

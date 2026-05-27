@@ -1,5 +1,11 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
-import { apiPath } from "../lib/api";
+import { toast } from "sonner";
+import { apiPath, apiFetch } from "../lib/api";
+import {
+  orchestratorFromApi,
+  orchestratorToApiPayload,
+  type OrchestratorConfigApi,
+} from "../lib/orchestratorConfig";
 
 export type Status = "online" | "offline" | "limited";
 export type AuthMethod = "api_key" | "oauth" | "ssh" | "bearer" | "account";
@@ -38,7 +44,7 @@ export type Provider = {
  * - DeepSeek: api_key only (platform.deepseek.com).
  * - Kimi Code: api_key only (Moonshot platform).
  * - Cline: api_key (BYOK — Anthropic/OpenAI/etc. keys passed through) or bearer.
- * - IBM BOB (watsonx Code Assistant): api_key (IBM Cloud IAM) OR bearer (IAM token).
+ * - Grok / DeepSeek / Gemini: api_key for orchestrator LLM routing.
  */
 export const DEFAULT_PROVIDERS: Provider[] = [
   {
@@ -53,8 +59,8 @@ export const DEFAULT_PROVIDERS: Provider[] = [
     authMethod: "account",
     authMethods: ["account", "api_key"],
     accountProvider: "Anthropic",
-    model: "claude-sonnet-4-6",
-    models: ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"],
+    model: "claude-3-5-sonnet-latest",
+    models: ["claude-3-5-sonnet-latest", "claude-3-5-haiku-latest", "claude-3-opus-latest"],
     dailyCap: 20,
   },
   {
@@ -69,8 +75,8 @@ export const DEFAULT_PROVIDERS: Provider[] = [
     authMethod: "account",
     authMethods: ["account", "api_key"],
     accountProvider: "Google",
-    model: "gemini-3-pro",
-    models: ["gemini-3-pro", "gemini-3-flash", "gemini-2.5-pro"],
+    model: "gemini-1.5-flash",
+    models: ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash"],
     dailyCap: 15,
   },
   {
@@ -85,8 +91,8 @@ export const DEFAULT_PROVIDERS: Provider[] = [
     authMethod: "account",
     authMethods: ["account", "api_key"],
     accountProvider: "ChatGPT",
-    model: "gpt-codex-mini",
-    models: ["gpt-codex", "gpt-codex-mini", "o4-mini"],
+    model: "gpt-4o-mini",
+    models: ["gpt-4o-mini", "gpt-4o", "o1-mini"],
     dailyCap: 10,
   },
   {
@@ -101,8 +107,8 @@ export const DEFAULT_PROVIDERS: Provider[] = [
     authMethod: "account",
     authMethods: ["account"],
     accountProvider: "GitHub",
-    model: "copilot-chat",
-    models: ["copilot-chat", "copilot-claude", "copilot-gpt5"],
+    model: "gpt-4o",
+    models: ["gpt-4o", "claude-3.5-sonnet"],
     dailyCap: 12,
   },
   {
@@ -116,8 +122,8 @@ export const DEFAULT_PROVIDERS: Provider[] = [
     configured: false,
     authMethod: "api_key",
     authMethods: ["api_key"],
-    model: "deepseek-coder-v3",
-    models: ["deepseek-coder-v3", "deepseek-chat-v3", "deepseek-r1"],
+    model: "deepseek-coder",
+    models: ["deepseek-coder", "deepseek-chat"],
     dailyCap: 10,
   },
   {
@@ -131,8 +137,8 @@ export const DEFAULT_PROVIDERS: Provider[] = [
     configured: false,
     authMethod: "api_key",
     authMethods: ["api_key"],
-    model: "kimi-k2",
-    models: ["kimi-k2", "kimi-k1.5"],
+    model: "moonshot-v1-8k",
+    models: ["moonshot-v1-8k", "moonshot-v1-32k"],
     dailyCap: 8,
   },
   {
@@ -146,25 +152,56 @@ export const DEFAULT_PROVIDERS: Provider[] = [
     configured: false,
     authMethod: "api_key",
     authMethods: ["api_key", "bearer"],
-    model: "cline-claude",
-    models: ["cline-default", "cline-claude", "cline-gpt5"],
+    model: "claude-3-5-sonnet-latest",
+    models: ["claude-3-5-sonnet-latest", "gpt-4o", "gemini-1.5-pro"],
     dailyCap: 10,
   },
   {
-    id: "bob",
-    name: "IBM BOB",
-    glyph: "∎",
-    color: "text-blue-500",
-    description: "IBM watsonx Code Assistant on Granite — enterprise auth via IBM Cloud IAM.",
+    id: "grok",
+    name: "Grok",
+    glyph: "𝕏",
+    color: "text-red-500",
+    description: "xAI Grok — orchestrator LLM for planning, routing, and task decomposition.",
     status: "online",
     enabled: true,
     configured: false,
     authMethod: "api_key",
-    authMethods: ["api_key", "bearer"],
-    accountProvider: "IBM Cloud",
-    model: "granite-3.2-code",
-    models: ["granite-3.2-code", "granite-3.1-code-base"],
-    endpoint: "https://us-south.ml.cloud.ibm.com",
+    authMethods: ["api_key"],
+    model: "grok-2-1212",
+    models: ["grok-2-1212", "grok-beta"],
+    endpoint: "https://api.x.ai/v1",
+    dailyCap: 20,
+  },
+  {
+    id: "gemini-api",
+    name: "Gemini API",
+    glyph: "✦",
+    color: "text-indigo-500",
+    description: "Google Gemini orchestrator LLM — planning and routing via the Generative Language API.",
+    status: "online",
+    enabled: true,
+    configured: false,
+    authMethod: "api_key",
+    authMethods: ["api_key"],
+    model: "gemini-1.5-flash",
+    models: ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash"],
+    endpoint: "https://generativelanguage.googleapis.com/v1beta",
+    dailyCap: 20,
+  },
+  {
+    id: "deepseek-api",
+    name: "DeepSeek API",
+    glyph: "▲",
+    color: "text-violet-500",
+    description: "DeepSeek orchestrator LLM — cost-efficient planning and task decomposition.",
+    status: "online",
+    enabled: true,
+    configured: false,
+    authMethod: "api_key",
+    authMethods: ["api_key"],
+    model: "deepseek-chat",
+    models: ["deepseek-chat", "deepseek-reasoner"],
+    endpoint: "https://api.deepseek.com/v1",
     dailyCap: 15,
   },
 ];
@@ -187,7 +224,7 @@ export type SessionEntry = {
   summary: string;
   agents: string[];
   artifacts: string[];
-  status: "active" | "completed" | "failed";
+  status: "active" | "completed" | "failed" | "paused" | "archived";
   tokens: number;
   spend: number;
 };
@@ -205,17 +242,17 @@ type AppState = {
   providers: Provider[];
   orchestrator: OrchestratorCfg;
   prefs: Prefs;
-  sessions: SessionEntry[];
 };
 
 type Ctx = AppState & {
+  backendHydrated: boolean;
   setOnboarded: (v: boolean) => void;
   setWorkspace: (w: Workspace | null) => void;
   setProviders: React.Dispatch<React.SetStateAction<Provider[]>>;
   setOrchestrator: React.Dispatch<React.SetStateAction<OrchestratorCfg>>;
   setPrefs: React.Dispatch<React.SetStateAction<Prefs>>;
-  pushSession: (s: SessionEntry) => void;
-  clearSessions: () => void;
+  clearSessions: () => Promise<void>;
+  createSession: (title?: string) => Promise<number | null>;
   reset: () => Promise<void>;
 };
 
@@ -228,39 +265,13 @@ const DEFAULT_STATE: AppState = {
   workspace: null,
   providers: DEFAULT_PROVIDERS,
   orchestrator: {
-    model: "granite-3.2-instruct",
+    model: "grok-2-1212",
     routingStrategy: "specialty",
     parallelism: 4,
     autoFailover: true,
     globalDailyCap: 80,
   },
   prefs: { sound: true, desktopNotifs: false, autoSync: true, fontSize: "md" },
-  sessions: [
-    {
-      id: "demo-1",
-      startedAt: Date.now() - 1000 * 60 * 60 * 26,
-      endedAt: Date.now() - 1000 * 60 * 60 * 25,
-      prompt: "Refactor the auth middleware and add tests, generate the new login screen.",
-      summary: "Decomposed into 4 subtasks across 4 agents; all merged via divisions.md.",
-      agents: ["claude", "gemini", "codex", "copilot"],
-      artifacts: ["divisions.md", "task-graph.md", "Login.tsx", "auth.middleware.test.ts"],
-      status: "completed",
-      tokens: 124_500,
-      spend: 1.84,
-    },
-    {
-      id: "demo-2",
-      startedAt: Date.now() - 1000 * 60 * 90,
-      endedAt: Date.now() - 1000 * 60 * 12,
-      prompt: "Migrate prisma schema to drizzle in parallel.",
-      summary: "Schema diffed; 4 tables added, 2 renamed. Awaiting approval on destructive drop.",
-      agents: ["codex", "claude"],
-      artifacts: ["schema.drizzle.ts", "migration.sql"],
-      status: "completed",
-      tokens: 58_200,
-      spend: 0.74,
-    },
-  ],
 };
 
 type SettingsApiResponse = {
@@ -285,7 +296,9 @@ const PROVIDER_BY_CLI_SLUG: Record<string, string> = {
   "deepseek": "deepseek",
   "cline": "cline",
   "copilot-cli": "copilot",
-  "ibm-bob": "bob",
+  grok: "grok",
+  "kimi-code": "kimi",
+  kimi: "kimi",
 };
 
 const ROUTING_STRATEGIES: ReadonlyArray<OrchestratorCfg["routingStrategy"]> = [
@@ -474,7 +487,6 @@ function loadInitial(): AppState {
           : DEFAULT_PROVIDERS,
       orchestrator: { ...DEFAULT_STATE.orchestrator, ...(parsed.orchestrator || {}) },
       prefs: { ...DEFAULT_STATE.prefs, ...(parsed.prefs || {}) },
-      sessions: Array.isArray(parsed.sessions) ? parsed.sessions : DEFAULT_STATE.sessions,
     };
   } catch {
     return DEFAULT_STATE;
@@ -511,6 +523,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   /* Debounced persistence — avoids thrashing localStorage on rapid updates. */
   const saveTimer = useRef<number | null>(null);
   const backendSyncTimer = useRef<number | null>(null);
+  const orchestratorSyncTimer = useRef<number | null>(null);
   useEffect(() => {
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => {
@@ -528,7 +541,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
     const hydrateFromBackend = async () => {
       try {
-        const response = await fetch(apiPath("/settings"), { cache: "no-store" });
+        const response = await apiFetch("/settings", { cache: "no-store" });
         if (response.ok) {
           const payload = (await response.json()) as SettingsApiResponse;
           if (!cancelled && payload.preferences) {
@@ -540,7 +553,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       }
 
       try {
-        const provRes = await fetch(apiPath("/providers?enabled_only=false"), {
+        const provRes = await apiFetch("/providers?enabled_only=false", {
           cache: "no-store",
         });
         if (provRes.ok) {
@@ -574,7 +587,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       }
 
       try {
-        const response = await fetch(apiPath("/settings/cli-registry"), { cache: "no-store" });
+        const response = await apiFetch("/settings/cli-registry", { cache: "no-store" });
         if (response.ok) {
           const payload = (await response.json()) as CliRegistryApiResponse;
           const clis = Array.isArray(payload.clis) ? payload.clis : [];
@@ -587,6 +600,21 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         }
       } catch {
         // Registry sync is optional during local development.
+      }
+
+      try {
+        const response = await apiFetch("/orchestrator/config", { cache: "no-store" });
+        if (response.ok) {
+          const payload = (await response.json()) as OrchestratorConfigApi;
+          if (!cancelled) {
+            setState((prev) => ({
+              ...prev,
+              orchestrator: orchestratorFromApi(prev.orchestrator, payload),
+            }));
+          }
+        }
+      } catch {
+        // Orchestrator config is optional until DB is initialized.
       }
 
       if (!cancelled) {
@@ -611,22 +639,55 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const payload = {
         preferences: toBackendPreferences(state),
       };
-      void fetch(apiPath("/settings"), {
+      void apiFetch("/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+      }).then((res) => {
+        if (!res.ok) {
+          toast.error("Settings sync failed — changes may not be saved.");
+        }
+      }).catch(() => {
+        toast.error("Settings sync failed — backend unreachable.");
       });
     }, 500);
 
     return () => {
       if (backendSyncTimer.current) window.clearTimeout(backendSyncTimer.current);
     };
-  }, [backendHydrated, state.onboarded, state.workspace, state.providers, state.orchestrator, state.prefs]);
+  }, [backendHydrated, state.onboarded, state.workspace, state.providers, state.prefs]);
+
+  useEffect(() => {
+    if (!backendHydrated) return;
+    if (!state.prefs.autoSync) {
+      if (orchestratorSyncTimer.current) window.clearTimeout(orchestratorSyncTimer.current);
+      return;
+    }
+    if (orchestratorSyncTimer.current) window.clearTimeout(orchestratorSyncTimer.current);
+    orchestratorSyncTimer.current = window.setTimeout(() => {
+      void apiFetch("/orchestrator/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(orchestratorToApiPayload(state.orchestrator)),
+      }).then((res) => {
+        if (!res.ok) {
+          toast.error("Orchestrator config sync failed.");
+        }
+      }).catch(() => {
+        toast.error("Orchestrator config sync failed — backend unreachable.");
+      });
+    }, 500);
+
+    return () => {
+      if (orchestratorSyncTimer.current) window.clearTimeout(orchestratorSyncTimer.current);
+    };
+  }, [backendHydrated, state.orchestrator, state.prefs.autoSync]);
 
   return (
     <StoreCtx.Provider
       value={{
         ...state,
+        backendHydrated,
         setOnboarded: (v) => setState((s) => ({ ...s, onboarded: v })),
         setWorkspace: (w) => setState((s) => ({ ...s, workspace: w })),
         setProviders: (u) =>
@@ -644,9 +705,30 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             ...s,
             prefs: typeof u === "function" ? (u as any)(s.prefs) : u,
           })),
-        pushSession: (entry) =>
-          setState((s) => ({ ...s, sessions: [entry, ...s.sessions].slice(0, 100) })),
-        clearSessions: () => setState((s) => ({ ...s, sessions: [] })),
+        createSession: async (title = "New chat") => {
+          try {
+            const res = await apiFetch("/sessions", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                user_id: 1,
+                title,
+                session_type: "chat",
+                status: "active",
+              }),
+            });
+            if (!res.ok) return null;
+            const data = await res.json();
+            return typeof data.id === "number" ? data.id : null;
+          } catch {
+            return null;
+          }
+        },
+        clearSessions: async () => {
+          try {
+            await apiFetch("/sessions", { method: "DELETE" });
+          } catch {}
+        },
         reset: async () => {
           try {
             localStorage.removeItem(KEY);
@@ -655,17 +737,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             ...DEFAULT_STATE,
             onboarded: false,
             workspace: null,
-            sessions: [],
           };
           setState(resetState);
           try {
-            await fetch(apiPath("/settings"), {
-              method: "PUT",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                preferences: toBackendPreferences(resetState),
-              }),
-            });
+            await apiFetch("/settings/reset", { method: "POST" });
           } catch {
             // Local reset still works; backend will be overwritten on the next successful sync.
           }

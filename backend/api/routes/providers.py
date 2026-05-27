@@ -8,14 +8,10 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from datetime import datetime, timezone
 import aiosqlite
 import json
-from cryptography.fernet import Fernet
-import base64
 from pydantic import BaseModel, Field
 
 
-def utc_now() -> datetime:
-    """Return current UTC datetime with timezone info."""
-    return datetime.now(timezone.utc)
+from backend.utils import utc_now
 
 from backend.database.models import (
     Provider, ProviderUpdate, ProviderListResponse,
@@ -24,7 +20,6 @@ from backend.database.models import (
 from backend.api.dependencies import (
     get_db, get_current_user_id, verify_provider_exists
 )
-from backend.config import settings
 
 router = APIRouter(prefix="/providers", tags=["providers"])
 
@@ -40,56 +35,7 @@ class CredentialSubmit(BaseModel):
     quota_limit: Optional[int] = None
 
 
-# Cache the encryption key to avoid regenerating it
-_encryption_key: Optional[bytes] = None
-
-def get_encryption_key() -> bytes:
-    """Get or derive a valid Fernet key (url-safe base64, 32 raw bytes).
-
-    Strategy:
-      1. If `ENCRYPTION_KEY` already decodes to 32 raw bytes, use it directly.
-      2. Otherwise derive a stable 32-byte key via SHA256 over the provided
-         string (so the same `.env` value always produces the same Fernet key,
-         keeping previously-encrypted credentials decryptable).
-      3. If unset entirely, fall back to a freshly generated key (process-local).
-    """
-    global _encryption_key
-    if _encryption_key is not None:
-        return _encryption_key
-
-    import hashlib, logging
-    raw = (settings.encryption_key or "").strip()
-    if raw:
-        try:
-            candidate = base64.urlsafe_b64decode(raw)
-            if len(candidate) == 32:
-                _encryption_key = base64.urlsafe_b64encode(candidate)
-                return _encryption_key
-        except Exception:
-            pass
-        # Derive a stable Fernet key from whatever string was provided.
-        digest = hashlib.sha256(raw.encode("utf-8")).digest()
-        _encryption_key = base64.urlsafe_b64encode(digest)
-        return _encryption_key
-
-    logging.warning(
-        "No ENCRYPTION_KEY configured; generating an ephemeral key. "
-        "Existing encrypted credentials cannot be decrypted across restarts."
-    )
-    _encryption_key = Fernet.generate_key()
-    return _encryption_key
-
-
-def encrypt_credential(value: str) -> str:
-    """Encrypt a credential value."""
-    f = Fernet(get_encryption_key())
-    return f.encrypt(value.encode()).decode()
-
-
-def decrypt_credential(encrypted_value: str) -> str:
-    """Decrypt a credential value."""
-    f = Fernet(get_encryption_key())
-    return f.decrypt(encrypted_value.encode()).decode()
+from backend.utils.credentials import decrypt_credential, encrypt_credential, get_encryption_key, is_masked_credential
 
 
 @router.get("", response_model=ProviderListResponse)
@@ -277,16 +223,32 @@ async def store_credentials(
     """
     now = utc_now()
     
-    encrypted_api_key = encrypt_credential(credential_data.api_key)
-    encrypted_api_secret = encrypt_credential(credential_data.api_secret) if credential_data.api_secret else None
-
-    
     # Check if credentials already exist for this user/provider
     cursor = await db.execute(
-        "SELECT id FROM provider_credentials WHERE user_id = ? AND provider_id = ?",
+        "SELECT id, api_key, api_secret FROM provider_credentials WHERE user_id = ? AND provider_id = ?",
         (user_id, provider_id)
     )
     existing = await cursor.fetchone()
+
+    if is_masked_credential(credential_data.api_key):
+        if not existing:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot save masked credential placeholder for new credential; provide a real API key",
+            )
+        encrypted_api_key = existing["api_key"]
+    else:
+        encrypted_api_key = encrypt_credential(credential_data.api_key)
+
+    if credential_data.api_secret and is_masked_credential(credential_data.api_secret):
+        if existing:
+            encrypted_api_secret = existing["api_secret"]
+        else:
+            encrypted_api_secret = None
+    elif credential_data.api_secret:
+        encrypted_api_secret = encrypt_credential(credential_data.api_secret)
+    else:
+        encrypted_api_secret = None
     
     if existing:
         # Update existing credentials
@@ -363,6 +325,7 @@ async def store_credentials(
         quota_limit=row["quota_limit"],
         quota_used=row["quota_used"],
         quota_reset_at=datetime.fromisoformat(row["quota_reset_at"]) if row["quota_reset_at"] else None,
+        has_credentials=True,
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"])
     )
@@ -414,6 +377,7 @@ async def get_credentials(
         quota_limit=row["quota_limit"],
         quota_used=row["quota_used"],
         quota_reset_at=datetime.fromisoformat(row["quota_reset_at"]) if row["quota_reset_at"] else None,
+        has_credentials=bool(row["api_key"]),
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"])
     )
@@ -448,4 +412,3 @@ async def revoke_credentials(
             detail=f"Credentials for provider {provider_id} not found"
         )
 
-# Made with Bob

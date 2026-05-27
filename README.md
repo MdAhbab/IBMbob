@@ -1,10 +1,12 @@
-# Orchestrator - AI-Powered Development Assistant
+# AI Orchestrator — Multi-Agent Platform
 
-A unified interface for managing multiple AI CLI tools with smart dependency management, automatic workspace initialization, and comprehensive orchestration capabilities.
+Production-oriented multi-agent AI orchestration: a central orchestrator (Grok / Gemini / DeepSeek) plans and routes work to parallel CLI coding agents.
+
+**Architecture:** see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 
@@ -66,9 +68,19 @@ Once running, access:
 - **Alternative Docs:** http://localhost:8000/redoc
 - **Health Check:** http://localhost:8000/health
 
----
+### Orchestrator LLM keys
 
-## 📋 Features
+Configure in **Settings → Providers** or `backend/.env`:
+
+```env
+GROK_API_KEY=your-xai-key
+GEMINI_API_KEY=your-google-key
+DEEPSEEK_API_KEY=your-deepseek-key
+```
+
+Priority defaults: Grok → Gemini → DeepSeek (automatic fallback on failure).
+
+---
 
 ### Core Capabilities
 - ✅ **Multi-Provider Support** - Integrate with multiple AI providers (OpenAI, Anthropic, etc.)
@@ -189,53 +201,24 @@ LOG_JSON_FORMAT=false
 UPLOAD_DIR=./uploads
 WORKSPACE_DIR=./shared
 
-# IBM Watson Credentials
-STT_API_KEY=your-speech-to-text-api-key
-STT_URL=https://api.us-south.speech-to-text.watson.cloud.ibm.com
-WATSONX_API_KEY=your-watsonx-api-key
-WATSONX_PROJECT_ID=your-watsonx-project-id
+# Orchestrator LLM providers (at least one recommended)
+GROK_API_KEY=
+GEMINI_API_KEY=
+DEEPSEEK_API_KEY=
+DEFAULT_ORCHESTRATOR_MODEL=grok-3
 ```
 
-### IBM Watson Credentials Setup
+### Orchestrator LLM setup
 
-This application integrates with IBM Watson services for speech-to-text and AI inference capabilities.
+The orchestrator uses **Grok**, **Gemini**, or **DeepSeek** APIs for planning and chat. Configure via the Settings UI (encrypted in DB) or environment variables above.
 
-#### Required Credentials
+- **Grok**: [xAI Console](https://console.x.ai/) → API key
+- **Gemini**: [Google AI Studio](https://aistudio.google.com/) → API key  
+- **DeepSeek**: [DeepSeek Platform](https://platform.deepseek.com/) → API key
 
-1. **Speech-to-Text Service:**
-   - `STT_API_KEY`: Your IBM Watson Speech-to-Text API key
-   - `STT_URL`: Service URL (region-specific)
+Fallback order: `ORCHESTRATOR_PROVIDER_PRIORITY=grok,gemini-api,deepseek-api`
 
-2. **Watsonx.ai Service:**
-   - `WATSONX_API_KEY`: Your IBM Watsonx.ai API key
-   - `WATSONX_PROJECT_ID`: Your Watsonx.ai project ID
-
-#### How to Obtain Credentials
-
-1. **Create an IBM Cloud Account:**
-   - Visit [IBM Cloud](https://cloud.ibm.com/)
-   - Sign up or log in to your account
-
-2. **Create Speech-to-Text Service:**
-   - Navigate to the [IBM Cloud Catalog](https://cloud.ibm.com/catalog)
-   - Search for "Speech to Text"
-   - Create a new service instance
-   - Go to "Manage" → "Credentials" to get your API key and URL
-
-3. **Create Watsonx.ai Service:**
-   - Navigate to [IBM Watsonx](https://www.ibm.com/watsonx)
-   - Create a new project or use an existing one
-   - Get your API key from IBM Cloud IAM
-   - Copy your project ID from the project settings
-
-4. **Add Credentials to .env:**
-   ```bash
-   # Edit backend/.env and add your credentials
-   STT_API_KEY=your-actual-api-key-here
-   STT_URL=https://api.us-south.speech-to-text.watson.cloud.ibm.com
-   WATSONX_API_KEY=your-actual-api-key-here
-   WATSONX_PROJECT_ID=your-actual-project-id-here
-   ```
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for routing, A2A, and MCP details.
 
 #### Security Best Practices
 
@@ -300,15 +283,14 @@ This application integrates with IBM Watson services for speech-to-text and AI i
 
 ### WebSocket API
 
-#### Runtime Execution
-- `WS /ws/runtimes/{runtime_id}` - Real-time runtime execution
+#### Terminal Streaming
+- `WS /ws/terminals/{runtime_id}` - Real-time PTY terminal I/O for a spawned CLI runtime
 
-**Message Format:**
+**Message Format (client → server):**
 ```json
 {
-  "type": "execute",
-  "code": "print('Hello, World!')",
-  "language": "python"
+  "type": "input",
+  "data": "ls -la\r"
 }
 ```
 
@@ -341,6 +323,7 @@ IBMbob/
 │
 ├── shared/            # Shared resources
 │   ├── sessions/      # Session data
+│   ├── plan.md        # Shared project plan
 │   └── skill.md       # Skill templates
 │
 ├── docs/              # Documentation
@@ -591,6 +574,15 @@ Sensitive data (API keys, credentials) is encrypted using the `ENCRYPTION_KEY`. 
 - Randomly generated
 - Securely stored
 - Never committed to version control
+
+---
+
+## Audits
+
+Security and architecture audit reports for this repository:
+
+- [composer_report.md](composer_report.md) — Composer audit (installer, docs, API gaps, frontend wiring)
+- [gemini_report.md](gemini_report.md) — Gemini audit
 
 ---
 

@@ -9,6 +9,7 @@ import {
   Eye,
   EyeOff,
   Folder,
+  History,
   Info,
   Keyboard,
   Layers,
@@ -27,8 +28,9 @@ import { useTheme } from "./theme";
 import { Dropdown } from "./Sidebar";
 import { TerminalCard, type CliRuntime } from "./TerminalCard";
 import { ContextDropzone, INITIAL_CTX, type CtxFile } from "./ContextDropzone";
-import { apiPath } from "../lib/api";
+import { apiFetch, apiPath } from "../lib/api";
 import { CliInstallHint } from "./CliInstallHint";
+import { SessionHistory } from "./SessionHistory";
 
 type Tab =
   | "general"
@@ -38,6 +40,7 @@ type Tab =
   | "context"
   | "notifications"
   | "shortcuts"
+  | "sessions"
   | "privacy"
   | "about";
 
@@ -49,6 +52,7 @@ const TABS: { id: Tab; label: string; icon: typeof Folder; desc: string }[] = [
   { id: "context", label: "Context", icon: Layers, desc: "Sync · auto-generated files" },
   { id: "notifications", label: "Notifications", icon: Bell, desc: "Sound · desktop alerts" },
   { id: "shortcuts", label: "Shortcuts", icon: Keyboard, desc: "Keyboard map" },
+  { id: "sessions", label: "Sessions", icon: History, desc: "History · spend · artifacts" },
   { id: "privacy", label: "Privacy", icon: ShieldCheck, desc: "Telemetry · local data" },
   { id: "about", label: "About", icon: Info, desc: "Version · license · credits" },
 ];
@@ -143,6 +147,7 @@ export function Settings({
             {tab === "context" && <ContextPanel />}
             {tab === "notifications" && <NotificationsPanel />}
             {tab === "shortcuts" && <ShortcutsPanel />}
+            {tab === "sessions" && <SessionsPanel />}
             {tab === "privacy" && <PrivacyPanel />}
             {tab === "about" && <AboutPanel />}
           </motion.div>
@@ -299,10 +304,11 @@ function ProviderRow({ p, onChange }: { p: Provider; onChange: (p: Provider) => 
     let cancelled = false;
     void (async () => {
       try {
-        const r = await fetch(apiPath(`/providers/${p.dbId}/credentials`));
+        const r = await apiFetch(`/providers/${p.dbId}/credentials`);
         if (r.ok && !cancelled) {
           const j = await r.json();
-          setSecret((j.api_key as string) || "");
+          const key = (j.api_key as string) || "";
+          setSecret(key === "***" ? "" : key);
         }
       } catch {
         if (!cancelled) setSecret("");
@@ -313,14 +319,25 @@ function ProviderRow({ p, onChange }: { p: Provider; onChange: (p: Provider) => 
     };
   }, [open, p.dbId]);
 
-  const persistEnabled = (v: boolean) => {
+  const persistEnabled = async (v: boolean) => {
+    // Optimistic update
     onChange({ ...p, enabled: v });
     if (p.dbId) {
-      void fetch(apiPath(`/providers/${p.dbId}`), {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ is_enabled: v }),
-      });
+      try {
+        const r = await apiFetch(`/providers/${p.dbId}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ is_enabled: v }),
+        });
+        if (!r.ok) {
+          console.error("Failed to persist enabled state", await r.text());
+          // Rollback on failure
+          onChange({ ...p, enabled: !v });
+        }
+      } catch (e) {
+        console.error("Network error persisting enabled state", e);
+        onChange({ ...p, enabled: !v });
+      }
     }
   };
 
@@ -328,13 +345,18 @@ function ProviderRow({ p, onChange }: { p: Provider; onChange: (p: Provider) => 
     if (!p.dbId) return;
     setBusy(true);
     try {
-      await fetch(apiPath(`/providers/${p.dbId}`), {
+      await apiFetch(`/providers/${p.dbId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ is_enabled: p.enabled, default_model: p.model }),
       });
-      if ((p.authMethod === "api_key" || p.authMethod === "bearer") && secret.trim()) {
-        const r = await fetch(apiPath(`/providers/${p.dbId}/credentials`), {
+      if (
+        (p.authMethod === "api_key" || p.authMethod === "bearer") &&
+        secret.trim() &&
+        secret !== "***" &&
+        !secret.includes("***")
+      ) {
+        const r = await apiFetch(`/providers/${p.dbId}/credentials`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -344,6 +366,18 @@ function ProviderRow({ p, onChange }: { p: Provider; onChange: (p: Provider) => 
         });
         if (!r.ok) {
           console.warn("credential save failed", await r.text());
+        }
+      } else if (p.authMethod === "account" && p.accountEmail?.trim()) {
+        const r = await apiFetch(`/providers/${p.dbId}/credentials`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            credential_name: "default",
+            api_key: p.accountEmail.trim(),
+          }),
+        });
+        if (!r.ok) {
+          console.warn("account credential save failed", await r.text());
         }
       }
       onChange({ ...p, configured: !!(p.authMethod === "account" ? p.accountEmail : secret) });
@@ -356,9 +390,12 @@ function ProviderRow({ p, onChange }: { p: Provider; onChange: (p: Provider) => 
 
   const revoke = async () => {
     if (!p.dbId) return;
+    if (!confirm(`Are you sure you want to revoke/delete the stored credentials for ${p.name}?`)) {
+      return;
+    }
     setBusy(true);
     try {
-      await fetch(apiPath(`/providers/${p.dbId}/credentials`), { method: "DELETE" });
+      await apiFetch(`/providers/${p.dbId}/credentials`, { method: "DELETE" });
       setSecret("");
       onChange({ ...p, configured: false });
     } catch (e) {
@@ -472,6 +509,7 @@ function ProviderRow({ p, onChange }: { p: Provider; onChange: (p: Provider) => 
                   type={show ? "text" : "password"}
                   value={secret}
                   onChange={(e) => setSecret(e.target.value)}
+                  placeholder={p.configured ? "••••••••••••••••" : "Enter API key"}
                   className={inp + " font-mono flex-1"}
                 />
                 <button
@@ -564,7 +602,7 @@ function TerminalsPanel({ clis }: { clis: CliRuntime[] }) {
   );
 }
 
-const ORCH_MODELS = ["granite-3.2-instruct", "granite-3.2-code", "granite-3.1-instruct"] as const;
+const ORCH_MODELS = ["grok-3", "grok-3-mini", "gemini-2.5-pro", "deepseek-chat"] as const;
 const ROUTING = ["specialty", "round_robin", "cheapest", "fastest"] as const;
 const ROUTING_LABELS: Record<string, string> = {
   specialty: "Specialty-based (recommended)",
@@ -575,11 +613,26 @@ const ROUTING_LABELS: Record<string, string> = {
 
 function OrchestratorPanel() {
   const { orchestrator, setOrchestrator } = useStore();
+  const [health, setHealth] = useState<{ provider_id: string; status: string }[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void apiFetch("/orchestrator/providers/health")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((rows) => {
+        if (!cancelled && Array.isArray(rows)) setHealth(rows);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   return (
     <>
-      <SectionTitle title="Orchestrator" sub="The IBM Cloud agent that divides tasks across your CLIs." />
+      <SectionTitle title="Orchestrator" sub="Central intelligence layer — plans tasks and routes work to your CLI agents." />
       <div className="rounded-xl border border-zinc-200/70 bg-white/60 px-4 dark:border-white/[0.06] dark:bg-zinc-950/40">
-        <Row title="Orchestrator model" desc="Custom agent built on IBM Granite via IBM Cloud">
+        <Row title="Orchestrator model" desc="LLM used for decomposition and routing (Grok, Gemini, or DeepSeek)">
           <div className="w-full sm:w-[240px]">
             <Dropdown
               value={orchestrator.model}
@@ -632,6 +685,37 @@ function OrchestratorPanel() {
             className={inp + " w-full font-mono sm:w-[120px]"}
           />
         </Row>
+        {health.length > 0 && (
+          <Row title="Provider health" desc="Live connectivity for orchestrator LLMs">
+            <div className="flex flex-wrap gap-1.5">
+              {health.map((h) => (
+                <span
+                  key={h.provider_id}
+                  className={`rounded-md border px-2 py-0.5 font-mono text-[9px] ${
+                    h.status === "healthy"
+                      ? "border-emerald-300/40 text-emerald-700 dark:text-emerald-300"
+                      : "border-rose-300/40 text-rose-700 dark:text-rose-300"
+                  }`}
+                >
+                  {h.provider_id}: {h.status}
+                </span>
+              ))}
+            </div>
+          </Row>
+        )}
+        <Row title="Reset defaults" desc="Restore orchestrator routing configuration">
+          <button
+            type="button"
+            onClick={() => {
+              void apiFetch("/orchestrator/config/reset", { method: "POST" }).then(() =>
+                window.location.reload()
+              );
+            }}
+            className="rounded-md border border-zinc-300 px-3 py-1 font-mono text-[10px] hover:bg-zinc-50 dark:border-white/10 dark:hover:bg-white/5"
+          >
+            Reset orchestrator
+          </button>
+        </Row>
       </div>
     </>
   );
@@ -639,7 +723,29 @@ function OrchestratorPanel() {
 
 function ContextPanel() {
   const { prefs, setPrefs } = useStore();
-  const [files, setFiles] = useState<CtxFile[]>(INITIAL_CTX);
+  const [files, setFiles] = useState<CtxFile[]>([]);
+
+  useEffect(() => {
+    void apiFetch("/workspace/context")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        const rows = data?.files ?? [];
+        if (Array.isArray(rows) && rows.length) {
+          setFiles(
+            rows.map((f: any, i: number) => ({
+              id: String(f.id ?? i),
+              name: f.filename ?? f.name ?? "file",
+              size: f.size ? `${(f.size / 1024).toFixed(1)} kb` : "—",
+              status: "synced" as const,
+              agents: 0,
+              source: (f.source === "orchestrator" ? "orchestrator" : "user") as "user" | "orchestrator",
+            }))
+          );
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   return (
     <>
       <SectionTitle title="Context" sub="How the workspace context bus behaves." />
@@ -723,6 +829,15 @@ function ShortcutsPanel() {
   );
 }
 
+function SessionsPanel() {
+  return (
+    <>
+      <SectionTitle title="Session history" sub="Past orchestrator runs from the backend." />
+      <SessionHistory />
+    </>
+  );
+}
+
 function PrivacyPanel() {
   const { reset } = useStore();
   return (
@@ -772,17 +887,32 @@ function AboutPanel() {
           </div>
         </div>
         <p className="mt-4 max-w-md text-[12.5px] leading-relaxed text-zinc-600 dark:text-zinc-300">
-          MIT licensed. Built with React, Tailwind, and a tiny IBM-Cloud-powered routing agent
-          that orchestrates Claude, Gemini, Codex, Copilot, DeepSeek, Kimi, Cline, and BOB.
+          MIT licensed. Multi-agent orchestration platform that coordinates Claude, Gemini,
+          Codex, Copilot, DeepSeek, Kimi, Cline, and Grok orchestrator routing.
         </p>
         <div className="mt-4 flex gap-2">
-          <a className="rounded-md border border-zinc-200/70 bg-white px-2.5 py-1 text-[11px] text-zinc-700 hover:bg-zinc-50 dark:border-white/[0.06] dark:bg-white/[0.02] dark:text-zinc-200">
+          <a
+            href="https://github.com"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="rounded-md border border-zinc-200/70 bg-white px-2.5 py-1 text-[11px] text-zinc-700 hover:bg-zinc-50 dark:border-white/[0.06] dark:bg-white/[0.02] dark:text-zinc-200"
+          >
             Docs
           </a>
-          <a className="rounded-md border border-zinc-200/70 bg-white px-2.5 py-1 text-[11px] text-zinc-700 hover:bg-zinc-50 dark:border-white/[0.06] dark:bg-white/[0.02] dark:text-zinc-200">
+          <a
+            href="https://github.com"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="rounded-md border border-zinc-200/70 bg-white px-2.5 py-1 text-[11px] text-zinc-700 hover:bg-zinc-50 dark:border-white/[0.06] dark:bg-white/[0.02] dark:text-zinc-200"
+          >
             GitHub
           </a>
-          <a className="rounded-md border border-zinc-200/70 bg-white px-2.5 py-1 text-[11px] text-zinc-700 hover:bg-zinc-50 dark:border-white/[0.06] dark:bg-white/[0.02] dark:text-zinc-200">
+          <a
+            href="https://github.com"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="rounded-md border border-zinc-200/70 bg-white px-2.5 py-1 text-[11px] text-zinc-700 hover:bg-zinc-50 dark:border-white/[0.06] dark:bg-white/[0.02] dark:text-zinc-200"
+          >
             Changelog
           </a>
         </div>

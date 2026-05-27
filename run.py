@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-IBM Bob - Main Entry Point
+AI Orchestrator - Main Entry Point
 Unified script to run backend and frontend servers with comprehensive management.
 Includes automatic virtual environment and dependency management.
 """
@@ -602,7 +602,9 @@ class ProcessManager:
             print_success(f"Using virtual environment: {self.venv_dir}")
 
             backend_env = os.environ.copy()
-            db_abs = (self.project_root / "data" / "bob.db").resolve()
+            db_path = self._resolve_database_path_for_init()
+            p = Path(db_path)
+            db_abs = (self.project_root / p).resolve() if not p.is_absolute() else p.resolve()
             backend_env["DATABASE_PATH"] = str(db_abs)
             backend_env["DATABASE_URL"] = (
                 "sqlite+aiosqlite:///" + str(db_abs).replace("\\", "/")
@@ -833,7 +835,7 @@ class ProcessManager:
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description="IBM Bob - Unified server launcher",
+        description="AI Orchestrator - Unified server launcher",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -1059,5 +1061,3 @@ Examples:
 
 if __name__ == "__main__":
     main()
-
-# Made with Bob

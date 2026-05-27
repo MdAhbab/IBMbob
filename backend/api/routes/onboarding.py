@@ -24,15 +24,24 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from backend.api.dependencies import get_current_user_id, get_db
-from backend.api.routes.providers import encrypt_credential
+from backend.utils.credentials import encrypt_credential
 from backend.utils.paths import normalize_workspace_path
 
 router = APIRouter(prefix="/onboarding", tags=["onboarding"])
 logger = logging.getLogger(__name__)
 
+# Orchestrator HTTP LLM providers — never disabled by CLI onboarding selection (CRIT-006)
+ORCHESTRATOR_LLM_NAMES = frozenset({"grok", "gemini-api", "deepseek-api"})
+INFRA_PROVIDER_NAMES = frozenset(
+    {"openai", "anthropic", "google", "ollama", "openai-embedding", "openai-tts", "openai-stt", "bob"}
+)
+
+
+from backend.utils import utc_now
+
 
 def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return utc_now().isoformat()
 
 
 class OnboardingWorkspace(BaseModel):
@@ -259,6 +268,9 @@ async def complete_onboarding(
 
     for name, pid in all_provider_names.items():
         is_selected = name in selected
+        # Keep orchestrator LLM + infra providers enabled regardless of CLI picks
+        if name in ORCHESTRATOR_LLM_NAMES or name in INFRA_PROVIDER_NAMES:
+            is_selected = True
         cfg = payload.cli_configs.get(name)
         default_model = cfg.model if (cfg and cfg.model) else None
         await _set_provider_enabled(db, name, is_selected, default_model)
