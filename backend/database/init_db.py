@@ -32,28 +32,18 @@ class DatabaseInitializer:
         self.migrations_dir = Path(__file__).resolve().parents[2] / "migrations"
         
     def _ensure_data_directory(self) -> None:
-        """Ensure the data directory exists and the DB lives under <project>/data/."""
-        # Resolve to absolute path; refuse to create the DB anywhere except
-        # <project_root>/data/ to prevent stray ibm_bob.db / bob.db at repo root.
-        abs_path = Path(self.db_path).resolve()
-        project_root = Path(__file__).resolve().parents[2]
-        expected_root = (project_root / "data").resolve()
-        try:
-            abs_path.relative_to(expected_root)
-        except ValueError:
-            # Allow per-user installer location (%LOCALAPPDATA%\IBMBob\data) too:
-            # any path explicitly under a folder named "data" is OK.
-            if abs_path.parent.name != "data":
-                raise ValueError(
-                    f"Refusing to use database at {abs_path}: must be under "
-                    f"{expected_root} or another .../data/ directory "
-                    f"(set DATABASE_PATH explicitly for portable installs)."
-                )
+        """Ensure the parent directory of the database file exists and is writable.
 
+        Previously enforced that the DB must live under a folder named 'data/'.
+        That constraint is now relaxed to support containerised or custom mount-point
+        installs (e.g. /var/lib/ibmbob/bob.db, %LOCALAPPDATA%\\IBMBob\\data\\bob.db).
+        We still prefer the canonical <project>/data/ location for new installs.
+        """
+        abs_path = Path(self.db_path).resolve()
         db_dir = abs_path.parent
         if db_dir and not db_dir.exists():
             db_dir.mkdir(parents=True, exist_ok=True)
-            logger.info(f"Created data directory: {db_dir}")
+            logger.info(f"Created database directory: {db_dir}")
     
     @contextmanager
     def get_connection(self):

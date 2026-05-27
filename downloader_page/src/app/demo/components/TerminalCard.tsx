@@ -9,7 +9,7 @@ import {
   Send,
 } from "lucide-react";
 import { useState } from "react";
-import { Dropdown } from "./Sidebar";
+import { Dropdown } from "./Dropdown";
 
 type AuthMethod = "api_key" | "oauth" | "ssh" | "bearer" | "account";
 
@@ -88,7 +88,6 @@ export function TerminalCard({ cli, defaultMenuOpen = false }: { cli: CliRuntime
               options={cli.models}
               onChange={setModel}
               className="w-[140px]"
-              listWidth="w-[180px] right-0"
             />
           </div>
           <span

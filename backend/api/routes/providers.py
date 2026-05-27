@@ -5,7 +5,7 @@ Handles provider listing, configuration, and credential management.
 
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, status
-from datetime import datetime, timezone
+from datetime import datetime
 import aiosqlite
 import json
 from pydantic import BaseModel, Field

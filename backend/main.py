@@ -131,10 +131,8 @@ def _error_json(
     status_code: int,
 ) -> JSONResponse:
     """Build a JSON error response without risking datetime serialization bugs."""
-    import json as _json
-
     payload = ErrorResponse(error=error, detail=detail, code=code).model_dump(mode="json")
-    return JSONResponse(status_code=status_code, content=_json.loads(_json.dumps(payload)))
+    return JSONResponse(status_code=status_code, content=payload)
 
 
 @app.exception_handler(RequestValidationError)

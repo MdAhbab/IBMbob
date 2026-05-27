@@ -290,7 +290,7 @@ function FeatureIcon({
   icon: Icon,
   color,
 }: {
-  icon: React.ComponentType<{ className?: string; strokeWidth?: number }>;
+  icon: React.ComponentType<any>;
   color: "emerald" | "violet" | "fuchsia" | "blue" | "cyan" | "rose";
 }) {
   const colorMap = {

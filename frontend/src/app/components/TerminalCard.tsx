@@ -246,7 +246,7 @@ export function TerminalCard({
       } catch (e) {
         spawnInProgressRef.current = false;
         console.error("Failed to spawn runtime:", e);
-        void trackAnalyticsEvent("spawn_failed", {
+        void trackAnalyticsEvent("error_occurred", {
           metadata: { provider: cli.id, error: String(e) },
         });
         termRef.current?.writeln(`\x1b[31m[orch] failed to start terminal: ${e}\x1b[0m`);

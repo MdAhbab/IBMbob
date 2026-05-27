@@ -405,7 +405,7 @@ function Shell() {
             routing_strategy: strategy,
           }),
         });
-        void trackAnalyticsEvent("task_dispatched", {
+        void trackAnalyticsEvent("command_executed", {
           sessionId: activeSessionId,
           metadata: { division: div.short, strategy },
         });

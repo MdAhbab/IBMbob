@@ -247,7 +247,7 @@ async def workspace_git_status(
         head_subject=subj.strip() or None,
         ahead=ahead,
         behind=behind,
-        files_changed=len([l for l in porc.splitlines() if l.strip()]),
+        files_changed=len([line for line in porc.splitlines() if line.strip()]),
         is_repo=True,
     )
 

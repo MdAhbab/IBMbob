@@ -16,7 +16,7 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 from backend.database.models import (
-    UsageAnalytics, EventType, RoutingHistory, AnalyticsResponse
+    EventType
 )
 from backend.api.dependencies import (
     get_db, get_current_user_id

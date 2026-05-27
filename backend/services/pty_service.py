@@ -89,7 +89,7 @@ class PtySession:
         self._lock = threading.Lock()
         self.user_id: Optional[int] = None
         self._idle_timer: Optional[threading.Timer] = None
-        self._idle_seconds: float = 90.0
+        self._idle_seconds: float = 300.0  # 5 min — gives user time to reconnect
 
     @property
     def status(self) -> str:

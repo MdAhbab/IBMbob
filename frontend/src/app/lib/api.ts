@@ -54,17 +54,37 @@ export const healthPath = healthCheckUrl();
 
 const DEFAULT_FETCH_MS = 8000;
 
-/** fetch() with an AbortSignal timeout so hung backends surface errors in the UI. */
+/** fetch() with an AbortSignal timeout so hung backends surface errors in the UI.
+ *  When the caller also provides a signal (e.g. component-unmount abort), both are
+ *  combined via AbortSignal.any() so neither timeout nor cancellation is silently dropped.
+ */
 export function apiFetch(
   path: string,
   init?: RequestInit & { timeoutMs?: number },
 ): Promise<Response> {
   const { timeoutMs = DEFAULT_FETCH_MS, ...rest } = init ?? {};
-  const signal =
-    rest.signal ??
-    (typeof AbortSignal !== "undefined" && "timeout" in AbortSignal
+
+  // Build the timeout signal only if AbortSignal.timeout is available (modern browsers).
+  const timeoutSignal =
+    typeof AbortSignal !== "undefined" && "timeout" in AbortSignal
       ? AbortSignal.timeout(timeoutMs)
-      : undefined);
+      : undefined;
+
+  let signal: AbortSignal | undefined;
+  if (rest.signal && timeoutSignal) {
+    // Combine caller's cancellation signal with the built-in timeout so that
+    // neither is silently dropped (fixes §6.2 / GF-014).
+    signal =
+      "any" in AbortSignal
+        ? (AbortSignal as unknown as { any: (sigs: AbortSignal[]) => AbortSignal }).any([
+            rest.signal,
+            timeoutSignal,
+          ])
+        : timeoutSignal; // Fallback: keep timeout as the signal if .any() unavailable
+  } else {
+    signal = rest.signal ?? timeoutSignal;
+  }
+
   return fetch(apiPath(path), { ...rest, signal });
 }
 

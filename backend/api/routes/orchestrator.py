@@ -1,4 +1,4 @@
-﻿"""
+"""
 Orchestrator management API routes.
 Handles task dispatching and orchestrator configuration.
 """
@@ -527,7 +527,7 @@ async def reset_orchestrator_config(
     
     # Create new default config
     now = utc_now()
-    cursor = await db.execute(
+    await db.execute(
         """
         INSERT INTO orchestrator_config (
             user_id, config_name, routing_strategy, max_retries,
