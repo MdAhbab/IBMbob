@@ -11,6 +11,7 @@ import {
   Check,
 } from "lucide-react";
 import { apiFetch } from "../lib/api";
+import { toast } from "sonner";
 
 export type CtxFile = {
   id: string;
@@ -81,6 +82,7 @@ export function ContextDropzone({
   onToggle,
   agentCount = 0,
   onResync,
+  onDeleteFile,
 }: {
   files: CtxFile[];
   setFiles: React.Dispatch<React.SetStateAction<CtxFile[]>>;
@@ -88,6 +90,7 @@ export function ContextDropzone({
   onToggle?: () => void;
   agentCount?: number;
   onResync?: () => void;
+  onDeleteFile?: (file: CtxFile) => Promise<boolean> | boolean;
 }) {
   const [drag, setDrag] = useState(false);
   const [filter, setFilter] = useState<"all" | "user" | "orch">("all");
@@ -253,7 +256,16 @@ export function ContextDropzone({
                   </div>
                   {!f.pinned && (
                     <button
-                      onClick={() => setFiles((p) => p.filter((x) => x.id !== f.id))}
+                      onClick={async () => {
+                        if (onDeleteFile) {
+                          const ok = await Promise.resolve(onDeleteFile(f)).catch(() => false);
+                          if (!ok) {
+                            toast.error("Failed to delete file.");
+                            return;
+                          }
+                        }
+                        setFiles((p) => p.filter((x) => x.id !== f.id));
+                      }}
                       className="rounded p-1 text-zinc-400 opacity-0 transition hover:bg-zinc-100 hover:text-zinc-700 group-hover:opacity-100 dark:hover:bg-white/5 dark:hover:text-zinc-200"
                     >
                       <X className="h-3 w-3" />

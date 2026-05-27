@@ -38,7 +38,6 @@ const fmtDuration = (s: SessionEntry) => {
 
 function mapSessionStatus(raw: string): SessionEntry["status"] {
   if (raw === "completed") return "completed";
-  if (raw === "failed") return "failed";
   if (raw === "paused") return "paused";
   if (raw === "archived") return "archived";
   return "active";
@@ -49,10 +48,6 @@ const StatusBadge = ({ s }: { s: SessionEntry["status"] }) => {
     completed: {
       cls: "border-emerald-300/40 bg-emerald-50 text-emerald-700 dark:border-emerald-400/20 dark:bg-emerald-400/10 dark:text-emerald-300",
       Icon: CircleCheck,
-    },
-    failed: {
-      cls: "border-rose-300/40 bg-rose-50 text-rose-700 dark:border-rose-400/20 dark:bg-rose-400/10 dark:text-rose-300",
-      Icon: CircleX,
     },
     active: {
       cls: "border-indigo-300/40 bg-indigo-50 text-indigo-700 dark:border-indigo-400/20 dark:bg-indigo-400/10 dark:text-indigo-300",
@@ -192,7 +187,9 @@ export function SessionHistory() {
         <button
           onClick={() => {
             if (confirm("Clear all session history?")) {
-              void clearSessions().then(() => setSessions([]));
+              void clearSessions().then((ok) => {
+                if (ok) setSessions([]);
+              });
             }
           }}
           className="flex items-center gap-1 rounded-md border border-zinc-200/70 bg-white px-2 py-1.5 text-[11px] text-zinc-600 hover:bg-zinc-50 dark:border-white/[0.07] dark:bg-white/[0.02] dark:text-zinc-300 dark:hover:bg-white/[0.06]"

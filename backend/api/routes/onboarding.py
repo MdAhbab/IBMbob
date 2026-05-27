@@ -154,6 +154,8 @@ async def _upsert_credential(
     cfg: OnboardingCliConfig,
 ) -> bool:
     """Encrypt + store/refresh a credential row for this provider. Returns True if stored."""
+    if cfg.method in {"account", "oauth"}:
+        return False
     if not cfg.secret:
         return False
 
@@ -258,6 +260,8 @@ async def complete_onboarding(
 
     selected = set(payload.selected)
 
+    enabled_map: Dict[str, bool] = {}
+
     # Look up every known provider so we can flip the ones not selected to disabled.
     cur = await db.execute("SELECT id, name FROM providers")
     rows = await cur.fetchall()
@@ -271,6 +275,7 @@ async def complete_onboarding(
         # Keep orchestrator LLM + infra providers enabled regardless of CLI picks
         if name in ORCHESTRATOR_LLM_NAMES or name in INFRA_PROVIDER_NAMES:
             is_selected = True
+        enabled_map[name] = is_selected
         cfg = payload.cli_configs.get(name)
         default_model = cfg.model if (cfg and cfg.model) else None
         await _set_provider_enabled(db, name, is_selected, default_model)
@@ -288,7 +293,7 @@ async def complete_onboarding(
     ]
     for name in all_provider_names:
         cfg = payload.cli_configs.get(name)
-        pref_pairs.append((f"cli.{name}.enabled", name in selected, "cli"))
+        pref_pairs.append((f"cli.{name}.enabled", enabled_map.get(name, name in selected), "cli"))
         pref_pairs.append((f"cli.{name}.configured", bool(cfg), "cli"))
         if cfg:
             if cfg.model:

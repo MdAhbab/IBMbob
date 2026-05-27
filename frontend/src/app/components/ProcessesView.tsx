@@ -8,6 +8,7 @@ import { AnalyticsStrip } from "./AnalyticsStrip";
 import { AgentsToolsPanel } from "./AgentsToolsPanel";
 import { ArtifactsPanel } from "./ArtifactsPanel";
 import { RuntimeLogPanel } from "./RuntimeLogPanel";
+import { apiFetch } from "../lib/api";
 
 type Tab = "all" | "executing" | "idle" | "limited" | "permission";
 
@@ -42,6 +43,16 @@ export const ProcessesView = forwardRef<
   const totalUsed = clis.reduce((s, c) => s + c.used, 0);
   const totalCap = clis.reduce((s, c) => s + c.cap, 0);
   const activeRuntimes = clis.filter((c) => c.runtimeId != null).length;
+
+  const handleDeleteShared = async (file: CtxFile) => {
+    if (!file.id) return false;
+    const res = await apiFetch(`/workspace/shared?path=${encodeURIComponent(file.id)}`, {
+      method: "DELETE",
+    });
+    if (!res.ok) return false;
+    onResyncShared?.();
+    return true;
+  };
 
   return (
     <div ref={ref} className="h-full min-h-0 overflow-y-auto pb-44 sm:pb-48">
@@ -154,6 +165,7 @@ export const ProcessesView = forwardRef<
               setFiles={setFiles}
               agentCount={clis.length}
               onResync={onResyncShared}
+              onDeleteFile={handleDeleteShared}
             />
           </div>
         </Section>

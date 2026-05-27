@@ -725,6 +725,12 @@ function ContextPanel() {
   const { prefs, setPrefs } = useStore();
   const [files, setFiles] = useState<CtxFile[]>([]);
 
+  const deleteContextFile = async (file: CtxFile) => {
+    if (!/^\d+$/.test(file.id)) return false;
+    const res = await apiFetch(`/workspace/context/${file.id}`, { method: "DELETE" });
+    return res.ok;
+  };
+
   useEffect(() => {
     void apiFetch("/workspace/context")
       .then((r) => (r.ok ? r.json() : null))
@@ -761,7 +767,7 @@ function ContextPanel() {
         </Row>
       </div>
       <div className="h-[420px] overflow-hidden rounded-xl border border-zinc-200/70 bg-white/60 dark:border-white/[0.06] dark:bg-zinc-950/40">
-        <ContextDropzone files={files} setFiles={setFiles} />
+        <ContextDropzone files={files} setFiles={setFiles} onDeleteFile={deleteContextFile} />
       </div>
     </>
   );

@@ -3,7 +3,6 @@ import type { SessionEntry } from "../components/store";
 
 export function mapSessionStatus(raw: string): SessionEntry["status"] {
   if (raw === "completed") return "completed";
-  if (raw === "failed") return "failed";
   if (raw === "paused") return "paused";
   if (raw === "archived") return "archived";
   return "active";

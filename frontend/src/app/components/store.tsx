@@ -224,7 +224,7 @@ export type SessionEntry = {
   summary: string;
   agents: string[];
   artifacts: string[];
-  status: "active" | "completed" | "failed" | "paused" | "archived";
+  status: "active" | "completed" | "paused" | "archived";
   tokens: number;
   spend: number;
 };
@@ -251,7 +251,7 @@ type Ctx = AppState & {
   setProviders: React.Dispatch<React.SetStateAction<Provider[]>>;
   setOrchestrator: React.Dispatch<React.SetStateAction<OrchestratorCfg>>;
   setPrefs: React.Dispatch<React.SetStateAction<Prefs>>;
-  clearSessions: () => Promise<void>;
+  clearSessions: () => Promise<boolean>;
   createSession: (title?: string) => Promise<number | null>;
   reset: () => Promise<void>;
 };
@@ -726,8 +726,17 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         },
         clearSessions: async () => {
           try {
-            await apiFetch("/sessions", { method: "DELETE" });
-          } catch {}
+            const res = await apiFetch("/sessions?confirm=true", { method: "DELETE" });
+            if (!res.ok) {
+              const detail = await res.text().catch(() => "");
+              toast.error(detail ? detail.slice(0, 160) : "Failed to clear sessions.");
+              return false;
+            }
+            return true;
+          } catch (err) {
+            toast.error("Failed to clear sessions — backend unreachable.");
+            return false;
+          }
         },
         reset: async () => {
           try {

@@ -15,13 +15,11 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
-  Eye,
   EyeOff,
   Folder,
   FolderOpen,
   Globe2,
   KeyRound,
-  Lock,
   Mail,
   Moon,
   Plug,
@@ -41,7 +39,6 @@ import { CliInstallHint } from "./CliInstallHint";
 type CliCfg = {
   method: AuthMethod;
   email: string;
-  password: string;
   secret: string;
   endpoint: string;
   keyPath: string;
@@ -54,12 +51,12 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   const { theme, toggle } = useTheme();
   const [step, setStep] = useState(0);
   const [folderPath, setFolderPath] = useState("");
+  const [pickedFolderName, setPickedFolderName] = useState("");
   const [recentFolders, setRecentFolders] = useState<string[]>([]);
   const [selected, setSelected] = useState<string[]>(
     providers.filter((p) => p.enabled).map((p) => p.id)
   );
   const [sharedEmail, setSharedEmail] = useState("");
-  const [sharedPassword, setSharedPassword] = useState("");
   const [cliCfg, setCliCfg] = useState<Record<string, CliCfg>>({});
   const [saving, setSaving] = useState(false);
   const [finishError, setFinishError] = useState<string | null>(null);
@@ -89,7 +86,6 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
           next[p.id] = {
             method: p.authMethod,
             email: "",
-            password: "",
             secret: "",
             endpoint: p.endpoint || "",
             keyPath: "~/.ssh/id_ed25519",
@@ -111,7 +107,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
       if (window.showDirectoryPicker) {
         // @ts-ignore
         const handle = await window.showDirectoryPicker();
-        setFolderPath(`~/${handle.name}`);
+        setPickedFolderName(handle?.name || "");
         return;
       }
     } catch {}
@@ -122,6 +118,11 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
     const trimmed = folderPath.trim();
     if (trimmed) return trimmed;
     return "~/projects/orchestra-workspace";
+  };
+
+  const handleFolderPathChange = (value: string) => {
+    setFolderPath(value);
+    if (value.trim()) setPickedFolderName("");
   };
 
   const finish = async () => {
@@ -147,8 +148,6 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
         const secret =
           c.method === "api_key" || c.method === "bearer"
             ? c.secret.trim()
-            : c.method === "account"
-            ? (c.override ? c.password.trim() : sharedPassword.trim())
             : "";
         cli_configs[id] = {
           method: c.method,
@@ -322,8 +321,9 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
               {step === 1 && (
                 <StepWorkspace
                   folderPath={folderPath}
-                  setFolderPath={setFolderPath}
+                  setFolderPath={handleFolderPathChange}
                   pickFolder={pickFolder}
+                  pickedFolderName={pickedFolderName}
                   recentFolders={recentFolders}
                   onBack={() => setStep(0)}
                   onNext={() => setStep(2)}
@@ -343,8 +343,6 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
                   providers={cliList}
                   sharedEmail={sharedEmail}
                   setSharedEmail={setSharedEmail}
-                  sharedPassword={sharedPassword}
-                  setSharedPassword={setSharedPassword}
                   onBack={() => setStep(2)}
                   onNext={() => setStep(4)}
                 />
@@ -355,7 +353,6 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
                   cliCfg={cliCfg}
                   setCliCfg={setCliCfg}
                   sharedEmail={sharedEmail}
-                  sharedPassword={sharedPassword}
                   onBack={() => setStep(3)}
                   onNext={() => setStep(5)}
                 />
@@ -457,6 +454,7 @@ function StepWorkspace({
   folderPath,
   setFolderPath,
   pickFolder,
+  pickedFolderName,
   recentFolders,
   onBack,
   onNext,
@@ -464,6 +462,7 @@ function StepWorkspace({
   folderPath: string;
   setFolderPath: (v: string) => void;
   pickFolder: () => void;
+  pickedFolderName: string;
   recentFolders: string[];
   onBack: () => void;
   onNext: () => void;
@@ -530,10 +529,18 @@ function StepWorkspace({
         </div>
         <div className="flex-1 text-left">
           <div className="text-[13px] text-zinc-900 dark:text-white">
-            {folderPath ? folderPath : "Choose folder…"}
+            {folderPath
+              ? folderPath
+              : pickedFolderName
+              ? `Selected: ${pickedFolderName}`
+              : "Choose folder…"}
           </div>
           <div className="font-mono text-[10px] text-zinc-500">
-            {folderPath ? "ready" : "click to open native picker"}
+            {folderPath
+              ? "ready"
+              : pickedFolderName
+              ? "paste the full path below"
+              : "click to open native picker"}
           </div>
         </div>
         {folderPath && pathValid === true && <CheckCircle2 className="h-4 w-4 text-emerald-500" />}
@@ -573,7 +580,9 @@ function StepWorkspace({
         </label>
         <input
           value={folderPath}
-          onChange={(e) => setFolderPath(e.target.value)}
+          onChange={(e) => {
+            setFolderPath(e.target.value);
+          }}
           placeholder="~/projects/your-app"
           className="mt-1.5 w-full rounded-lg border border-zinc-200/70 bg-white px-3 py-2 font-mono text-[12px] text-zinc-800 outline-none focus:border-indigo-400 dark:border-white/[0.06] dark:bg-white/[0.02] dark:text-zinc-200"
         />
@@ -694,24 +703,18 @@ function StepSharedAccount({
   providers,
   sharedEmail,
   setSharedEmail,
-  sharedPassword,
-  setSharedPassword,
   onBack,
   onNext,
 }: {
   providers: Provider[];
   sharedEmail: string;
   setSharedEmail: (v: string) => void;
-  sharedPassword: string;
-  setSharedPassword: (v: string) => void;
   onBack: () => void;
   onNext: () => void;
 }) {
   const accountClis = providers.filter((p) => p.authMethods.includes("account"));
   const apiOnlyClis = providers.filter((p) => !p.authMethods.includes("account"));
   const emailValid = /.+@.+\..+/.test(sharedEmail.trim());
-  const pwOk = sharedPassword.length === 0 || sharedPassword.length >= 6;
-  const [showPw, setShowPw] = useState(false);
 
   return (
     <div className="px-8 py-10">
@@ -719,18 +722,18 @@ function StepSharedAccount({
         <AtSign className="h-3 w-3" /> Shared account
       </div>
       <h2 className="mt-3 text-[26px] leading-tight tracking-tight text-zinc-900 dark:text-white">
-        Sign in once — use everywhere.
+        Add one email to map your account-based CLIs.
       </h2>
       <p className="mt-2 max-w-lg text-[13px] leading-relaxed text-zinc-500">
-        Drop in one email + password here and we'll reuse it for every CLI that uses an
-        account login. Any CLI that needs different creds — or an API key / SSH — gets its
-        own row on the next step.
+        Account CLIs still open their own sign-in flows. We only store an email label for
+        display and routing context. Any CLI that needs an API key or SSH gets its own row
+        on the next step.
       </p>
 
       <div className="mt-6 grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div>
           <label className="font-mono text-[10px] uppercase tracking-[0.2em] text-zinc-500 dark:text-zinc-400">
-            Email
+            Email (optional)
           </label>
           <div className="mt-1.5 flex items-center gap-1.5 rounded-lg border border-zinc-200/70 bg-white px-3 dark:border-white/[0.06] dark:bg-white/[0.02]">
             <Mail className="h-4 w-4 text-zinc-400" />
@@ -744,32 +747,9 @@ function StepSharedAccount({
             {emailValid && <CheckCircle2 className="h-4 w-4 text-emerald-500" />}
           </div>
         </div>
-        <div>
-          <label className="font-mono text-[10px] uppercase tracking-[0.2em] text-zinc-500 dark:text-zinc-400">
-            Password
-          </label>
-          <div className="mt-1.5 flex items-center gap-1.5 rounded-lg border border-zinc-200/70 bg-white px-3 dark:border-white/[0.06] dark:bg-white/[0.02]">
-            <Lock className="h-4 w-4 text-zinc-400" />
-            <input
-              type={showPw ? "text" : "password"}
-              value={sharedPassword}
-              onChange={(e) => setSharedPassword(e.target.value)}
-              placeholder="••••••••"
-              className="w-full bg-transparent py-2.5 text-[13px] text-zinc-800 outline-none placeholder:text-zinc-400 dark:text-zinc-200"
-            />
-            <button
-              type="button"
-              onClick={() => setShowPw((s) => !s)}
-              className="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200"
-            >
-              {showPw ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-            </button>
-          </div>
-        </div>
       </div>
       <p className="mt-2 font-mono text-[9.5px] text-zinc-500">
-        Stored encrypted on-device. Each provider still opens its own sign-in window — your
-        password is never sent to orchestra's servers.
+        Account logins happen in the CLI itself. We never collect your password.
       </p>
 
       {accountClis.length > 0 && (
@@ -833,7 +813,7 @@ function StepSharedAccount({
           <GhostBtn onClick={onNext}>Skip for now</GhostBtn>
           <PrimaryBtn
             onClick={onNext}
-            disabled={accountClis.length > 0 && (!emailValid || !pwOk)}
+            disabled={accountClis.length > 0 && sharedEmail.trim().length > 0 && !emailValid}
           >
             Continue <ArrowRight className="h-3.5 w-3.5" />
           </PrimaryBtn>
@@ -848,7 +828,6 @@ function StepConfigureAll({
   cliCfg,
   setCliCfg,
   sharedEmail,
-  sharedPassword,
   onBack,
   onNext,
 }: {
@@ -856,7 +835,6 @@ function StepConfigureAll({
   cliCfg: Record<string, CliCfg>;
   setCliCfg: React.Dispatch<React.SetStateAction<Record<string, CliCfg>>>;
   sharedEmail: string;
-  sharedPassword: string;
   onBack: () => void;
   onNext: () => void;
 }) {
@@ -885,7 +863,7 @@ function StepConfigureAll({
             (<span className="font-mono text-zinc-700 dark:text-zinc-300">{sharedEmail}</span>)
           </>
         )}
-        . Expand any row to use a different email/password, paste an API key, or set SSH
+        . Expand any row to use a different email, paste an API key, or set SSH
         details.
       </p>
 
@@ -937,7 +915,6 @@ function StepConfigureAll({
                     cfg={c}
                     onChange={(patchObj) => patch(p.id, patchObj)}
                     sharedEmail={sharedEmail}
-                    sharedPassword={sharedPassword}
                   />
                 </div>
               )}
@@ -968,16 +945,13 @@ function ConfigureRow({
   cfg,
   onChange,
   sharedEmail,
-  sharedPassword,
 }: {
   provider: Provider;
   cfg: CliCfg;
   onChange: (patch: Partial<CliCfg>) => void;
   sharedEmail: string;
-  sharedPassword: string;
 }) {
   const [showSecret, setShowSecret] = useState(false);
-  const [showPw, setShowPw] = useState(false);
 
   return (
     <div className="space-y-3">
@@ -1032,12 +1006,12 @@ function ConfigureRow({
                     {sharedEmail}
                   </div>
                   <div className="font-mono text-[9.5px] uppercase tracking-wider text-indigo-600 dark:text-indigo-300">
-                    shared · {sharedPassword ? "password set" : "password not set"}
+                    shared account
                   </div>
                 </div>
               </div>
               <button
-                onClick={() => onChange({ override: true, email: "", password: "" })}
+                onClick={() => onChange({ override: true, email: "" })}
                 className="shrink-0 rounded-md border border-zinc-200/70 bg-white px-2 py-1 text-[10.5px] text-zinc-600 hover:bg-zinc-50 dark:border-white/[0.07] dark:bg-white/[0.02] dark:text-zinc-300"
               >
                 Use different
@@ -1057,28 +1031,9 @@ function ConfigureRow({
                   />
                 </div>
               </Field>
-              <Field label="Password">
-                <div className="flex items-center gap-1.5 rounded-lg border border-zinc-200/70 bg-white px-2.5 dark:border-white/[0.06] dark:bg-white/[0.02]">
-                  <Lock className="h-3.5 w-3.5 text-zinc-400" />
-                  <input
-                    type={showPw ? "text" : "password"}
-                    value={cfg.password}
-                    onChange={(e) => onChange({ password: e.target.value })}
-                    placeholder="••••••••"
-                    className="w-full bg-transparent py-2 text-[12.5px] text-zinc-800 outline-none placeholder:text-zinc-400 dark:text-zinc-200"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowPw((s) => !s)}
-                    className="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200"
-                  >
-                    {showPw ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-                  </button>
-                </div>
-              </Field>
               {sharedEmail && (
                 <button
-                  onClick={() => onChange({ override: false, email: "", password: "" })}
+                  onClick={() => onChange({ override: false, email: "" })}
                   className="col-span-full justify-self-start rounded-md border border-zinc-200/70 bg-white px-2 py-1 text-[10.5px] text-zinc-600 hover:bg-zinc-50 dark:border-white/[0.07] dark:bg-white/[0.02] dark:text-zinc-300"
                 >
                   ← back to shared account

@@ -21,7 +21,6 @@ import { SESSIONS_CHANGED } from "../lib/sessionsBus";
 
 function mapSessionStatus(raw: string): SessionEntry["status"] {
   if (raw === "completed") return "completed";
-  if (raw === "failed") return "failed";
   if (raw === "paused") return "paused";
   if (raw === "archived") return "archived";
   return "active";
@@ -44,7 +43,6 @@ const fmtWhen = (t: number) => {
 
 const STATUS_ICON: Record<SessionEntry["status"], { Icon: typeof CircleCheck; cls: string }> = {
   completed: { Icon: CircleCheck, cls: "text-emerald-500" },
-  failed: { Icon: CircleX, cls: "text-rose-500" },
   active: { Icon: Loader2, cls: "text-indigo-500 animate-spin" },
   paused: { Icon: Clock, cls: "text-amber-500" },
   archived: { Icon: CircleX, cls: "text-zinc-400" },
@@ -116,6 +114,16 @@ export function Sidebar({
   const [gitCmd, setGitCmd] = useState("");
   const [gitOutput, setGitOutput] = useState<string>("");
 
+  const gitWriteCommands = new Set([
+    "pull",
+    "switch",
+    "add",
+    "stash",
+    "push",
+    "commit",
+    "checkout",
+  ]);
+
   // Fetch real sessions from backend
   useEffect(() => {
     let cancelled = false;
@@ -165,11 +173,18 @@ export function Sidebar({
 
   const runGit = async () => {
     if (!gitCmd.trim()) return;
+    const raw = gitCmd.trim();
+    const cleaned = raw.startsWith("git ") ? raw.slice(4) : raw;
+    const subcmd = cleaned.split(/\s+/)[0] || "";
+    const needsConfirm = gitWriteCommands.has(subcmd);
+    if (needsConfirm && !confirm(`Run git ${subcmd}? This can modify your repo.`)) {
+      return;
+    }
     try {
       const r = await apiFetch("/workspace/git/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: gitCmd }),
+        body: JSON.stringify({ command: gitCmd, confirm: needsConfirm }),
       });
       if (!r.ok) {
         const detail = await r.text();

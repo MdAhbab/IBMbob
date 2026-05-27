@@ -4,7 +4,7 @@ Handles context files and artifacts management.
 """
 
 from typing import List, Optional, Set
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Query
 from datetime import datetime, timezone
 from pydantic import BaseModel
 import aiosqlite
@@ -341,14 +341,48 @@ async def upload_shared_context_file(
     """Upload a file into workspace/shared (no session required)."""
     if not file.filename:
         raise HTTPException(status_code=400, detail="Filename is required")
+    if not validate_file_type(file.filename):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"File type not allowed. Allowed types: {', '.join(settings.allowed_file_types)}",
+        )
     ws = await fetch_active_workspace_path(db, user_id)
     if not ws:
         raise HTTPException(status_code=404, detail="No active workspace configured")
     shared_dir = Path(ws) / "shared"
     shared_dir.mkdir(parents=True, exist_ok=True)
     safe_name = Path(file.filename).name
+    file_ext = Path(safe_name).suffix.lower()
+    if file_ext not in settings.allowed_file_types:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"File extension {file_ext} is not allowed.",
+        )
+    dangerous_exts = {
+        ".exe",
+        ".bat",
+        ".cmd",
+        ".com",
+        ".pif",
+        ".scr",
+        ".vbs",
+        ".js",
+        ".jar",
+        ".msi",
+        ".dll",
+        ".sh",
+        ".py",
+        ".ps1",
+    }
+    if file_ext in dangerous_exts:
+        safe_name = safe_name + ".txt"
     dest = shared_dir / safe_name
     content = await file.read()
+    if not validate_file_size(len(content)):
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File size exceeds maximum allowed size of {settings.max_upload_size} bytes",
+        )
     async with aiofiles.open(dest, "wb") as f:
         await f.write(content)
     stat = dest.stat()
@@ -388,6 +422,31 @@ async def list_shared_context_files(
         files=files,
         total=len(files),
     )
+
+
+@router.delete("/shared", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_shared_context_file(
+    path: str = Query(..., description="Relative path under shared/"),
+    db: aiosqlite.Connection = Depends(get_db),
+    user_id: int = Depends(get_current_user_id),
+):
+    """Delete a file from workspace/shared by relative path."""
+    ws = await _active_workspace_path(db, user_id)
+    if not ws:
+        raise HTTPException(status_code=404, detail="No active workspace configured")
+
+    shared_dir = Path(ws) / "shared"
+    shared_root = shared_dir.resolve()
+    target = (shared_dir / path).resolve()
+    if shared_root not in target.parents and target != shared_root:
+        raise HTTPException(status_code=400, detail="Invalid shared file path")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="Shared file not found")
+
+    try:
+        target.unlink()
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to delete file: {exc}") from exc
 
 
 @router.get("/context", response_model=ContextFilesResponse)
