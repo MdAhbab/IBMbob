@@ -15,9 +15,7 @@ import re
 from pathlib import Path
 
 
-def utc_now() -> datetime:
-    """Return current UTC datetime with timezone info."""
-    return datetime.now(timezone.utc)
+from backend.utils import utc_now
 
 import logging
 from backend.database.models import (
@@ -313,7 +311,7 @@ async def dispatch_task(
         aggregate_agent_results(plan, {a: "task assigned" for a in delegated})
 
     try:
-        await _write_divisions_artifact(db, user_id, request.task, metadata)
+        await _write_divisions_artifact(db, user_id, request.task, metadata, session_id=int(session_id))
     except Exception:
         logger.exception("failed to write divisions.md on dispatch")
 
@@ -559,6 +557,7 @@ async def _write_divisions_artifact(
     user_id: int,
     message: str,
     plan_metadata: Dict[str, Any],
+    session_id: Optional[int] = None,
 ) -> None:
     """Persist task divisions to workspace/shared/divisions.md."""
     divisions = plan_metadata.get("divisions") or []
@@ -573,31 +572,57 @@ async def _write_divisions_artifact(
     target_file = (shared_dir / "divisions.md").resolve()
 
     # Ensure target_file resides within workspace_path to prevent path traversal (SEC-09)
-    try:
-        target_file.relative_to(workspace_path)
-    except ValueError:
-        logger.error(f"Security violation: path traversal attempt prevented in _write_divisions_artifact for {target_file}")
-        return
 
-    lines = ["# Task Divisions", "", f"Task: {message.strip()}", ""]
+    # Build markdown content including new conflict-prevention fields
+    lines = [
+        "# Task Divisions",
+        "",
+        f"Task: {message.strip()}",
+        "",
+        f"Artifact base: {plan_metadata.get('artifact_base', str(shared_dir))}",
+        "",
+    ]
     for div in divisions:
-        lines.extend(
-            [
-                f"## {div.get('agent', div.get('short', 'Agent'))}",
-                "",
-                f"- Status: {div.get('status', 'queued')}",
-                f"- Short id: {div.get('short', '')}",
-                f"- Assignment: {div.get('task', '')}",
-                "",
-            ]
-        )
+        agent = div.get("agent") or div.get("short", "Agent")
+        lines.extend([
+            f"## {agent}",
+            "",
+            f"- **Agent ID**: `{div.get('short', '')}`",
+            f"- **Status**: {div.get('status', 'queued')}",
+            f"- **Parallel group**: {div.get('parallel_group', 0)}",
+            f"- **Assignment**: {div.get('task', '')}",
+        ])
+        if div.get("depends_on"):
+            lines.append(f"- **Depends on**: {', '.join(div['depends_on'])}")
+        if div.get("owns_files"):
+            lines.append(f"- **Owns files**: {', '.join('`' + f + '`' for f in div['owns_files'])}")
+        if div.get("reads_files"):
+            lines.append(f"- **Reads files**: {', '.join('`' + f + '`' for f in div['reads_files'])}")
+        lines.append("")
+
     text = "\n".join(lines).rstrip() + "\n"
 
-    def write_file() -> None:
+    def write_files() -> None:
+        # Legacy: workspace/shared/divisions.md
         shared_dir.mkdir(parents=True, exist_ok=True)
-        target_file.write_text(text, encoding="utf-8")
+        legacy_file = (shared_dir / "divisions.md").resolve()
+        try:
+            legacy_file.relative_to(workspace_path)
+            legacy_file.write_text(text, encoding="utf-8")
+        except ValueError:
+            logger.error("Security: path traversal prevented for legacy divisions.md")
 
-    await asyncio.to_thread(write_file)
+        # Per-session: workspace/shared/artifacts/<session_id>/divisions.md
+        if session_id is not None:
+            session_art_dir = (shared_dir / "artifacts" / str(session_id)).resolve()
+            try:
+                session_art_dir.relative_to(workspace_path)
+                session_art_dir.mkdir(parents=True, exist_ok=True)
+                (session_art_dir / "divisions.md").write_text(text, encoding="utf-8")
+            except ValueError:
+                logger.error("Security: path traversal prevented for session artifact dir")
+
+    await asyncio.to_thread(write_files)
 
 
 async def update_division_status_for_provider(

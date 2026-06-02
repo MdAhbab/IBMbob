@@ -23,6 +23,7 @@ import {
   Terminal as TerminalIcon,
   Trash2,
   Type,
+  Wrench,
 } from "lucide-react";
 import { ACCENT_COLORS, useStore, type AuthMethod, type Provider } from "./store";
 import { OrchestratorLogo } from "./OrchestratorLogo";
@@ -30,7 +31,7 @@ import { useTheme } from "./theme";
 import { Dropdown } from "./Sidebar";
 import { TerminalCard, type CliRuntime } from "./TerminalCard";
 import { ContextDropzone, INITIAL_CTX, type CtxFile } from "./ContextDropzone";
-import { apiFetch, apiPath } from "../lib/api";
+import { apiFetch, apiPath, readSseJsonStream } from "../lib/api";
 import { orchestratorToApiPayload } from "../lib/orchestratorConfig";
 import { CliInstallHint } from "./CliInstallHint";
 import { SessionHistory } from "./SessionHistory";
@@ -38,6 +39,7 @@ import { SessionHistory } from "./SessionHistory";
 type Tab =
   | "general"
   | "providers"
+  | "cli-setup"
   | "terminals"
   | "orchestrator"
   | "context"
@@ -50,6 +52,7 @@ type Tab =
 const TABS: { id: Tab; label: string; icon: typeof Folder; desc: string }[] = [
   { id: "general", label: "General", icon: Folder, desc: "Workspace · appearance · font" },
   { id: "providers", label: "Providers", icon: Plug, desc: "All connected CLIs" },
+  { id: "cli-setup", label: "Setup CLIs", icon: Wrench, desc: "Algorithmic installer" },
   { id: "terminals", label: "Terminals", icon: TerminalIcon, desc: "Live per-agent terminals" },
   { id: "orchestrator", label: "Orchestrator", icon: Cpu, desc: "Model · routing · caps" },
   { id: "context", label: "Context", icon: Layers, desc: "Sync · auto-generated files" },
@@ -145,6 +148,7 @@ export function Settings({
           >
             {tab === "general" && <GeneralPanel />}
             {tab === "providers" && <ProvidersPanel />}
+            {tab === "cli-setup" && <CliSetupPanel />}
             {tab === "terminals" && <TerminalsPanel clis={clis} />}
             {tab === "orchestrator" && <OrchestratorPanel />}
             {tab === "context" && <ContextPanel />}
@@ -1112,6 +1116,269 @@ function PrivacyPanel() {
             <CircleAlert className="h-3 w-3" /> Reset
           </button>
         </Row>
+      </div>
+    </>
+  );
+}
+
+function CliSetupPanel() {
+  const [status, setStatus] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
+  const [installingSlug, setInstallingSlug] = useState<string | null>(null);
+  const [progress, setProgress] = useState(0);
+  const [currentMessage, setCurrentMessage] = useState("");
+  const [logs, setLogs] = useState<string[]>([]);
+  const [showLogs, setShowLogs] = useState(false);
+
+  const fetchStatus = async () => {
+    setLoading(true);
+    try {
+      const res = await apiFetch("/installer/status");
+      if (res.ok) {
+        const data = await res.json();
+        setStatus(data);
+      } else {
+        toast.error("Failed to load CLI status");
+      }
+    } catch (err) {
+      toast.error("Failed to connect to installer API");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void fetchStatus();
+  }, []);
+
+  const runInstall = async (slug: string | null) => {
+    setLogs([]);
+    setProgress(0);
+    setCurrentMessage(slug ? `Initializing install for ${slug}...` : "Initializing all CLI installs...");
+    setInstallingSlug(slug || "all");
+    setShowLogs(true);
+
+    try {
+      const url = slug ? `/installer/install/${slug}` : "/installer/install";
+      const body = slug ? undefined : { slugs: null };
+      const res = await apiFetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: body ? JSON.stringify(body) : undefined,
+        timeoutMs: 1200000,
+      });
+
+      if (!res.ok) {
+        const text = await res.text();
+        setLogs((prev) => [...prev, `[ERROR] Failed to start install: ${text}`]);
+        setCurrentMessage("Installation failed to start.");
+        return;
+      }
+
+      await readSseJsonStream(res, (event) => {
+        const { slug: evSlug, status: evStatus, message, progress_pct } = event as any;
+        if (evStatus === "stream_end") {
+          return;
+        }
+        if (evStatus === "done") {
+          toast.success(`${evSlug} installation completed!`);
+        } else if (evStatus === "error") {
+          toast.error(`${evSlug} installation failed: ${message}`);
+        }
+        setProgress(progress_pct || 0);
+        setCurrentMessage(message || "");
+        setLogs((prev) => [...prev, `[${evSlug.toUpperCase()}] ${message}`]);
+      });
+    } catch (err: any) {
+      setLogs((prev) => [...prev, `[ERROR] ${err.message || err}`]);
+      setCurrentMessage("Installation interrupted by an error.");
+      toast.error("Install failed");
+    } finally {
+      setInstallingSlug(null);
+      void fetchStatus();
+    }
+  };
+
+  const runVerify = async (slug: string) => {
+    try {
+      const res = await apiFetch(`/installer/verify/${slug}`);
+      if (res.ok) {
+        const info = await res.json();
+        toast.success(`${info.name} status: ${info.installed ? "Available (" + info.version + ")" : "Not found"}`);
+        void fetchStatus();
+      } else {
+        toast.error(`Verification failed for ${slug}`);
+      }
+    } catch {
+      toast.error("Network error verifying CLI");
+    }
+  };
+
+  if (!status && loading) {
+    return (
+      <div className="flex h-64 items-center justify-center">
+        <RefreshCw className="h-6 w-6 animate-spin text-zinc-400" />
+      </div>
+    );
+  }
+
+  const isInstalling = installingSlug !== null;
+
+  return (
+    <>
+      <div className="flex items-center justify-between mb-4">
+        <SectionTitle title="CLI Setup" sub="Check, install, and update local coding CLI tools." />
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => void fetchStatus()}
+            disabled={loading || isInstalling}
+            className="flex items-center gap-1.5 rounded-md border border-zinc-200/70 bg-white px-2.5 py-1.5 text-[11px] text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 dark:border-white/[0.06] dark:bg-white/[0.02] dark:text-zinc-200"
+          >
+            <RefreshCw className={`h-3 w-3 ${loading ? "animate-spin" : ""}`} />
+            Refresh
+          </button>
+          <button
+            onClick={() => void runInstall(null)}
+            disabled={isInstalling || !status?.node?.installed}
+            className="flex items-center gap-1.5 rounded-md bg-indigo-600 px-3 py-1.5 text-[11.5px] font-medium text-white hover:bg-indigo-700 disabled:opacity-50 dark:bg-indigo-500 dark:hover:bg-indigo-600"
+          >
+            Install All
+          </button>
+        </div>
+      </div>
+
+      {status?.node && (
+        <div className={`mb-6 rounded-2xl border p-4 ${status.node.installed && status.node.meets_requirement ? "border-zinc-200/70 bg-zinc-50/50 dark:border-white/[0.06] dark:bg-white/[0.01]" : "border-amber-300/40 bg-amber-500/[0.04] dark:border-amber-500/25 dark:bg-amber-500/[0.02]"}`}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className={`flex h-8 w-8 items-center justify-center rounded-lg ${status.node.installed && status.node.meets_requirement ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-400" : "bg-amber-100 text-amber-700 dark:bg-amber-500/10 dark:text-amber-400"}`}>
+                <TerminalIcon className="h-4 w-4" />
+              </div>
+              <div>
+                <h3 className="text-[13px] font-medium text-zinc-800 dark:text-zinc-200">Node.js Runtime</h3>
+                <p className="text-[11px] text-zinc-500">
+                  {status.node.installed 
+                    ? `Found version ${status.node.version} (npm ${status.node.npm_version})` 
+                    : "Node.js 18+ is required to install and run CLI tools."}
+                </p>
+              </div>
+            </div>
+            {!status.node.installed && (
+              <button
+                onClick={() => void runInstall("node")}
+                disabled={isInstalling}
+                className="rounded-md bg-amber-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-amber-700 dark:bg-amber-500 dark:hover:bg-amber-600"
+              >
+                Install Node.js
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {showLogs && (
+        <div className="mb-6 rounded-xl border border-zinc-200 dark:border-white/[0.06] bg-zinc-950 p-4 font-mono text-[11px] text-zinc-300">
+          <div className="flex items-center justify-between border-b border-zinc-800 pb-2 mb-2">
+            <div className="flex items-center gap-2">
+              <span className={`inline-block h-2 w-2 rounded-full ${isInstalling ? "bg-amber-500 animate-pulse" : "bg-emerald-500"}`} />
+              <span className="font-semibold text-zinc-400">Installation Console</span>
+            </div>
+            <button 
+              onClick={() => setShowLogs(false)} 
+              disabled={isInstalling}
+              className="text-zinc-500 hover:text-zinc-300 disabled:opacity-30"
+            >
+              Hide
+            </button>
+          </div>
+          <div className="mb-2 text-zinc-400 font-medium">{currentMessage}</div>
+          {isInstalling && (
+            <div className="w-full bg-zinc-800 h-1.5 rounded-full overflow-hidden mb-3">
+              <div 
+                className="bg-indigo-500 h-full transition-all duration-300" 
+                style={{ width: `${progress}%` }}
+              />
+            </div>
+          )}
+          <div className="max-h-48 overflow-y-auto space-y-1 pr-2">
+            {logs.map((log, index) => (
+              <div key={index} className={log.includes("[ERROR]") ? "text-rose-400" : log.includes("[SYSTEM]") ? "text-indigo-400" : ""}>
+                {log}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="space-y-3">
+        {status?.clis?.map((cli: any) => (
+          <div 
+            key={cli.slug} 
+            className="flex items-center justify-between rounded-xl border border-zinc-200/70 bg-white p-4 transition hover:bg-zinc-50/50 dark:border-white/[0.06] dark:bg-white/[0.01] dark:hover:bg-white/[0.02]"
+          >
+            <div className="flex-1 pr-4">
+              <div className="flex items-center gap-2.5">
+                <span className="text-[12.5px] font-semibold text-zinc-800 dark:text-zinc-200">{cli.name}</span>
+                {cli.api_only ? (
+                  <span className="rounded bg-sky-50 px-1.5 py-0.5 text-[9px] font-medium text-sky-700 dark:bg-sky-500/10 dark:text-sky-400">
+                    API-Key only
+                  </span>
+                ) : cli.installed ? (
+                  <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[9px] font-medium text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-400">
+                    Installed {cli.version && `(${cli.version.substring(0, 10)})`}
+                  </span>
+                ) : (
+                  <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[9px] font-medium text-zinc-600 dark:bg-white/10 dark:text-zinc-400">
+                    Not Installed
+                  </span>
+                )}
+              </div>
+              <p className="mt-1 text-[11.5px] text-zinc-500 leading-normal">{cli.description}</p>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {cli.specialties?.map((tag: string) => (
+                  <span 
+                    key={tag} 
+                    className="rounded-md border border-zinc-200/50 px-1.5 py-0.5 text-[9px] text-zinc-500 dark:border-white/[0.05]"
+                  >
+                    {tag}
+                  </span>
+                ))}
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              {cli.fallback_doc_url && (
+                <a
+                  href={cli.fallback_doc_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="rounded-md border border-zinc-200/70 bg-white px-2.5 py-1.5 text-[11px] text-zinc-700 hover:bg-zinc-50 dark:border-white/[0.06] dark:bg-white/[0.02] dark:text-zinc-200"
+                >
+                  Docs
+                </a>
+              )}
+              {!cli.api_only && (
+                <>
+                  {cli.installed && (
+                    <button
+                      onClick={() => void runVerify(cli.slug)}
+                      disabled={loading || isInstalling}
+                      className="rounded-md border border-zinc-200/70 bg-white px-2.5 py-1.5 text-[11px] text-zinc-700 hover:bg-zinc-50 dark:border-white/[0.06] dark:bg-white/[0.02] dark:text-zinc-200"
+                    >
+                      Verify
+                    </button>
+                  )}
+                  <button
+                    onClick={() => void runInstall(cli.slug)}
+                    disabled={isInstalling || !status?.node?.installed}
+                    className={`rounded-md px-2.5 py-1.5 text-[11px] font-medium transition ${cli.installed ? "border border-zinc-200 text-zinc-600 hover:bg-zinc-50 dark:border-white/[0.06] dark:text-zinc-400" : "bg-indigo-600 text-white hover:bg-indigo-700 dark:bg-indigo-500 dark:hover:bg-indigo-600"}`}
+                  >
+                    {cli.installed ? "Reinstall" : "Install"}
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        ))}
       </div>
     </>
   );

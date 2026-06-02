@@ -34,6 +34,7 @@ from backend.api.routes import (
     onboarding,
     agents,
     tools,
+    installer,
 )
 from backend.api.websockets import terminals as ws_terminals
 from backend.services.pty_service import pty_manager
@@ -56,7 +57,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     logger.info("Starting AI Orchestrator Backend...")
     logger.info(f"Environment: {'Development' if settings.debug else 'Production'}")
     logger.info(f"Database: {settings.database_path}")
-    
+
     # Initialize schema/migrations then open connection (CRIT-002)
     try:
         init_database(str(settings.database_path.resolve()), force=False)
@@ -65,7 +66,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")
         raise
-    
+
     # Create necessary directories
     settings.upload_dir.mkdir(parents=True, exist_ok=True)
     settings.context_files_dir.mkdir(parents=True, exist_ok=True)
@@ -73,19 +74,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     settings.cache_dir.mkdir(parents=True, exist_ok=True)
     settings.temp_dir.mkdir(parents=True, exist_ok=True)
     logger.info("Storage directories initialized")
-    
+
     # Bind PTY manager to the running event loop so reader threads can
     # safely dispatch output back to websocket connections.
     import asyncio as _asyncio
     pty_manager.bind_loop(_asyncio.get_running_loop())
-    
+
     logger.info("AI Orchestrator Backend started successfully")
-    
+
     yield
-    
+
     # Shutdown
     logger.info("Shutting down AI Orchestrator Backend...")
-    
+
     # Stop any live PTY sessions cleanly.
     pty_manager.shutdown()
 
@@ -96,7 +97,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     # Close database connection
     await close_db_connection()
     logger.info("Database connection closed")
-    
+
     logger.info("AI Orchestrator Backend shutdown complete")
 
 
@@ -170,7 +171,7 @@ async def health_check() -> HealthCheckResponse:
     """
     db_status = "disconnected"
     app_status = "unhealthy"
-    
+
     try:
         # Test database connection
         conn = await get_db_connection()
@@ -180,7 +181,7 @@ async def health_check() -> HealthCheckResponse:
             app_status = "healthy"
     except Exception as e:
         logger.error(f"Health check failed: {e}")
-    
+
     return HealthCheckResponse(
         status=app_status,
         database=db_status,
@@ -219,9 +220,25 @@ app.include_router(settings_routes.router, prefix=settings.api_prefix)
 app.include_router(onboarding.router, prefix=settings.api_prefix)
 app.include_router(agents.router, prefix=settings.api_prefix)
 app.include_router(tools.router, prefix=settings.api_prefix)
+app.include_router(installer.router, prefix=settings.api_prefix)
 
 # WebSocket router (no /api prefix so URL stays /ws/terminals/<id>).
 app.include_router(ws_terminals.router)
+
+# Middleware for request logging
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log all incoming requests."""
+    start_time = datetime.now(timezone.utc)
+    logger.info(f"Request: {request.method} {request.url.path}")
+    response = await call_next(request)
+    duration = (datetime.now(timezone.utc) - start_time).total_seconds()
+    logger.info(
+        f"Response: {request.method} {request.url.path} "
+        f"- Status: {response.status_code} - Duration: {duration:.3f}s"
+    )
+    return response
+
 
 _bundled = os.getenv("ORCHESTRATOR_BUNDLED", os.getenv("BOB_BUNDLED", "")).strip().lower() in ("1", "true", "yes")
 _dist_dir = Path(__file__).resolve().parent.parent / "frontend" / "dist"
@@ -229,33 +246,9 @@ if _bundled and _dist_dir.is_dir():
     app.mount("/", StaticFiles(directory=str(_dist_dir), html=True), name="frontend")
 
 
-# Middleware for request logging
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    """Log all incoming requests."""
-    start_time = datetime.now(timezone.utc)
-    
-    # Log request
-    logger.info(f"Request: {request.method} {request.url.path}")
-    
-    # Process request
-    response = await call_next(request)
-    
-    # Calculate duration
-    duration = (datetime.now(timezone.utc) - start_time).total_seconds()
-    
-    # Log response
-    logger.info(
-        f"Response: {request.method} {request.url.path} "
-        f"- Status: {response.status_code} - Duration: {duration:.3f}s"
-    )
-    
-    return response
-
-
 if __name__ == "__main__":
     import uvicorn
-    
+
     # Run the application
     uvicorn.run(
         "backend.main:app",
@@ -264,4 +257,3 @@ if __name__ == "__main__":
         reload=settings.debug,
         log_level=settings.log_level.lower()
     )
-

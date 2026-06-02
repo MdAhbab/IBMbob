@@ -731,6 +731,7 @@ function Shell() {
                     files={ctxFiles}
                     setFiles={setCtxFiles}
                     onResyncShared={() => void loadSharedContext()}
+                    activeSessionId={activeSessionId}
                     onRuntime={(pid, rid) =>
                       setClis((prev) =>
                         prev.map((c) =>

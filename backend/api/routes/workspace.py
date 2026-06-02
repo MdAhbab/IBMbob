@@ -443,6 +443,157 @@ async def delete_shared_context_file(
         raise HTTPException(status_code=500, detail=f"Failed to delete file: {exc}") from exc
 
 
+# ---------------------------------------------------------------------------
+# Session-scoped artifact endpoints
+# CLIs write their output to workspace/shared/artifacts/<session_id>/
+# Other CLIs can read any file in that directory.
+# ---------------------------------------------------------------------------
+
+class SessionArtifactFileResponse(BaseModel):
+    """A file in the per-session shared artifact directory."""
+    name: str
+    relative_path: str
+    size_bytes: int
+    modified_at: datetime
+    owner_agent: Optional[str] = None  # populated from divisions.md if parseable
+
+
+class SessionArtifactDirResponse(BaseModel):
+    session_id: int
+    artifact_dir: Optional[str] = None
+    exists: bool = False
+    files: List[SessionArtifactFileResponse] = []
+    total: int = 0
+
+
+def _parse_owner_from_divisions(divisions_text: str) -> dict:
+    """
+    Parse divisions.md to build a map of {filename: agent_short_id}.
+    Used to label which agent owns each artifact file.
+    """
+    owners: dict = {}
+    current_agent = None
+    for line in divisions_text.splitlines():
+        line = line.strip()
+        if line.startswith("## "):
+            current_agent = line[3:].strip()
+        elif line.startswith("- **Agent ID**:") and current_agent:
+            # Extract backtick-quoted agent id
+            import re as _re
+            m = _re.search(r"`([^`]+)`", line)
+            if m:
+                current_agent = m.group(1)
+        elif line.startswith("- **Owns files**:") and current_agent:
+            import re as _re
+            for m in _re.finditer(r"`([^`]+)`", line):
+                owners[m.group(1)] = current_agent
+    return owners
+
+
+@router.get("/artifacts/session/{session_id}", response_model=SessionArtifactDirResponse)
+async def list_session_artifacts(
+    session_id: int,
+    db: aiosqlite.Connection = Depends(get_db),
+    user_id: int = Depends(get_current_user_id),
+) -> SessionArtifactDirResponse:
+    """
+    List all artifact files in the shared artifact directory for a session.
+    The directory is: <workspace>/shared/artifacts/<session_id>/
+    """
+    ws = await _active_workspace_path(db, user_id)
+    if not ws:
+        return SessionArtifactDirResponse(session_id=session_id, exists=False, total=0)
+
+    workspace_path = Path(ws).resolve()
+    art_dir = (workspace_path / "shared" / "artifacts" / str(session_id)).resolve()
+
+    # Security: ensure art_dir is under workspace
+    try:
+        art_dir.relative_to(workspace_path)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid session artifact path")
+
+    if not art_dir.is_dir():
+        return SessionArtifactDirResponse(
+            session_id=session_id,
+            artifact_dir=str(art_dir),
+            exists=False,
+            total=0,
+        )
+
+    # Try to parse ownership from divisions.md
+    div_file = art_dir / "divisions.md"
+    owner_map: dict = {}
+    if div_file.is_file():
+        try:
+            owner_map = _parse_owner_from_divisions(div_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    files: List[SessionArtifactFileResponse] = []
+    for path in sorted(art_dir.rglob("*")):
+        if not path.is_file() or path.is_symlink():
+            continue
+        rel = path.relative_to(art_dir).as_posix()
+        if rel.startswith(".") or "/." in rel:
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        files.append(SessionArtifactFileResponse(
+            name=path.name,
+            relative_path=rel,
+            size_bytes=int(stat.st_size),
+            modified_at=datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc),
+            owner_agent=owner_map.get(rel),
+        ))
+
+    return SessionArtifactDirResponse(
+        session_id=session_id,
+        artifact_dir=str(art_dir),
+        exists=True,
+        files=files,
+        total=len(files),
+    )
+
+
+@router.get("/artifacts/session/{session_id}/{file_path:path}")
+async def get_session_artifact_file(
+    session_id: int,
+    file_path: str,
+    db: aiosqlite.Connection = Depends(get_db),
+    user_id: int = Depends(get_current_user_id),
+):
+    """
+    Serve a specific file from the per-session shared artifact directory.
+    Supports text (returned as plain text) and binary (returned as file download).
+    """
+    ws = await _active_workspace_path(db, user_id)
+    if not ws:
+        raise HTTPException(status_code=404, detail="No active workspace configured")
+
+    workspace_path = Path(ws).resolve()
+    art_dir = (workspace_path / "shared" / "artifacts" / str(session_id)).resolve()
+    target = (art_dir / file_path).resolve()
+
+    # Security: prevent path traversal
+    try:
+        target.relative_to(workspace_path)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid artifact file path")
+
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="Artifact file not found")
+
+    mime, _ = mimetypes.guess_type(str(target))
+    return FileResponse(
+        path=str(target),
+        media_type=mime or "application/octet-stream",
+        filename=target.name,
+    )
+
+
 @router.get("/context", response_model=ContextFilesResponse)
 async def get_context_files(
     session_id: Optional[int] = None,

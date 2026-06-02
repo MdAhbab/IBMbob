@@ -22,9 +22,10 @@ export const ProcessesView = forwardRef<
     setFiles?: React.Dispatch<React.SetStateAction<CtxFile[]>>;
     onResyncShared?: () => void;
     onRuntime?: (providerId: number | undefined, runtimeId: number | undefined) => void;
+    activeSessionId?: number | null;
   }
 >(function ProcessesView(
-  { clis, parallelism = 4, highlightAgentId = null, files: filesProp, setFiles: setFilesProp, onResyncShared, onRuntime },
+  { clis, parallelism = 4, highlightAgentId = null, files: filesProp, setFiles: setFilesProp, onResyncShared, onRuntime, activeSessionId = null },
   ref,
 ) {
   const [localFiles, setLocalFiles] = useState<CtxFile[]>([]);
@@ -66,7 +67,7 @@ export const ProcessesView = forwardRef<
           onToggle={() => setOrchOpen((o) => !o)}
         >
           <div className="h-[360px] sm:h-[420px]">
-            <OrchestratorGraph />
+            <OrchestratorGraph activeSessionId={activeSessionId} />
           </div>
         </Section>
 
@@ -141,7 +142,7 @@ export const ProcessesView = forwardRef<
           open={artifactsOpen}
           onToggle={() => setArtifactsOpen((o) => !o)}
         >
-          <ArtifactsPanel />
+          <ArtifactsPanel activeSessionId={activeSessionId} />
         </Section>
 
         <Section

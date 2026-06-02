@@ -4,17 +4,21 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from .context import SharedContext
 from .messages import OrchestratorPlan, TaskDivision
 
 AGENT_COLORS = {
     "claude": "#f59e0b",
+    "claude-code": "#f59e0b",
     "gemini": "#6366f1",
+    "gemini-cli": "#6366f1",
     "gemini-api": "#6366f1",
     "codex": "#10b981",
+    "codex-cli": "#10b981",
     "copilot": "#71717a",
+    "copilot-cli": "#71717a",
     "deepseek": "#a855f7",
     "deepseek-api": "#a855f7",
     "grok": "#ef4444",
@@ -23,28 +27,68 @@ AGENT_COLORS = {
     "orchestrator": "#8b5cf6",
 }
 
-ORCHESTRATOR_SYSTEM_PROMPT = """You are the central orchestrator for a multi-agent AI development platform.
-You coordinate CLI coding agents that the user has enabled.
+# ---------------------------------------------------------------------------
+# Enhanced system prompt — forces conflict-free task decomposition
+# ---------------------------------------------------------------------------
 
-Respond with a SINGLE JSON object — no markdown fences — matching:
+ORCHESTRATOR_SYSTEM_PROMPT = """\
+You are the central orchestrator for a multi-agent AI coding platform.
+You break down user requests and assign exclusive, non-overlapping work slices to each CLI agent.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CORE DECOMPOSITION RULES (MUST FOLLOW)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. EXCLUSIVE OWNERSHIP — Every file that will be produced must be listed in exactly ONE
+   agent's owns_files. No two agents may list the same file. Violating this causes merge conflicts.
+
+2. EXPLICIT DEPENDENCIES — If agent B needs output from agent A, set B.depends_on = [A.short].
+   Agents with no depends_on run in parallel (parallel_group = 0).
+   Agents that depend on others use parallel_group = 1 (or 2 for a third wave).
+
+3. READS FROM SHARED SPACE — If agent B reads a file agent A produces, list that file in
+   B.reads_files. The shared artifact directory is provided in the user prompt.
+
+4. MATCH SPECIALTY — Assign each agent work that fits its documented specialties.
+   Claude → architecture/refactoring/docs. Gemini → frontend/UI/TypeScript.
+   Codex → backend/algorithms/APIs. Copilot → tests/docs/glue code. Cline → shell/automation.
+
+5. PARALLEL FIRST — Group independent tasks at parallel_group=0. Only create group 1 or 2
+   if genuine data dependencies exist (i.e. one agent's output feeds another).
+
+6. MINIMAL DIVISIONS — Assign work only to agents that have something meaningful to do.
+   Do not create empty or trivial task slices.
+
+7. NO DELEGATION (no_delegation:true) — Set this if the request is conversational, asks for
+   information only, or clearly requires no coding work.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT FORMAT (strict JSON, no markdown fences)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {
   "content": "<short friendly reply, 1-3 sentences>",
-  "thinking": ["<step>", "..."],
+  "thinking": ["<reasoning step>", "..."],
   "divisions": [
-    {"agent": "<display name>", "short": "<agent id>", "color": "#hex", "task": "<one line>", "status": "running|queued|done"}
+    {
+      "agent": "<display name>",
+      "short": "<agent id matching enabled agent list>",
+      "color": "#hex",
+      "task": "<specific, actionable description of exactly what this agent does>",
+      "status": "running|queued",
+      "parallel_group": 0,
+      "depends_on": ["<short_id_of_prerequisite_agent>"],
+      "owns_files": ["relative/path/to/file.ext"],
+      "reads_files": ["relative/path/produced/by/another/agent.ext"]
+    }
   ],
-  "artifacts": [{"name": "<file>", "kind": "md|ts|py|json|txt"}],
-  "no_delegation": true|false
+  "artifacts": [{"name": "<filename>", "kind": "md|ts|py|json|txt"}],
+  "no_delegation": false
 }
-
-Rules:
-- Use divisions only when work should be split across agents; otherwise [].
-- Use artifacts only when files would be produced; otherwise [].
-- Delegate using the exact agent ID (the short identifier like 'gemini-api' or 'claude') as the "short" value in the divisions list, not their display name.
-- Set no_delegation to true if no agents are needed (e.g. for general/conversational queries), and false if agents are dispatched.
-- Prefer parallel independent tasks when possible.
 """
 
+
+# ---------------------------------------------------------------------------
+# JSON parse helpers
+# ---------------------------------------------------------------------------
 
 def _strip_fences(text: str) -> str:
     s = text.strip()
@@ -62,11 +106,11 @@ def try_repair_json(s: str) -> str:
         return s
     if s.endswith(","):
         s = s[:-1].strip()
-    
+
     stack = []
     in_string = False
     escape = False
-    
+
     for char in s:
         if escape:
             escape = False
@@ -85,10 +129,10 @@ def try_repair_json(s: str) -> str:
                     top = stack[-1]
                     if (char == '}' and top == '{') or (char == ']' and top == '['):
                         stack.pop()
-    
+
     if in_string:
         s += '"'
-    
+
     while stack:
         top = stack.pop()
         s = s.strip()
@@ -105,7 +149,7 @@ def parse_llm_plan(raw: str, fallback: str) -> Dict[str, Any]:
     cleaned = _strip_fences(raw)
     start = cleaned.find("{")
     end = cleaned.rfind("}")
-    
+
     # Try normal parse first
     if start != -1 and end != -1 and end > start:
         try:
@@ -125,32 +169,97 @@ def parse_llm_plan(raw: str, fallback: str) -> Dict[str, Any]:
         except json.JSONDecodeError:
             pass
 
-    # If it completely fails, raise JSONDecodeError
     raise json.JSONDecodeError("Failed to parse or repair LLM plan JSON", raw, 0)
 
+
+# ---------------------------------------------------------------------------
+# Conflict validation
+# ---------------------------------------------------------------------------
+
+def _validate_no_file_conflicts(divisions: List[TaskDivision]) -> List[str]:
+    """
+    Return a list of conflict descriptions if two agents claim ownership of the
+    same file. Empty list means no conflicts.
+    """
+    seen: Dict[str, str] = {}  # path -> agent short
+    conflicts = []
+    for div in divisions:
+        for path in div.owns_files:
+            if path in seen:
+                conflicts.append(
+                    f"File conflict: '{path}' claimed by both '{seen[path]}' and '{div.short}'"
+                )
+            else:
+                seen[path] = div.short
+    return conflicts
+
+
+# ---------------------------------------------------------------------------
+# Per-agent task templates
+# ---------------------------------------------------------------------------
 
 def _task_for_agent(agent_id: str, message: str) -> str:
     preview = " ".join(message.strip().split())[:180] or "the requested change"
     templates = {
-        "gemini": f"Analyze UX/product requirements and propose the frontend approach for: {preview}",
+        "gemini": f"Design and implement the frontend UI/UX approach for: {preview}",
+        "gemini-cli": f"Design and implement the frontend UI/UX approach for: {preview}",
         "gemini-api": f"Analyze UX/product requirements and propose the frontend approach for: {preview}",
-        "codex": f"Implement code changes and run focused verification for: {preview}",
-        "claude": f"Break down architecture, risks, and implementation order for: {preview}",
-        "copilot": f"Handle implementation glue, tests, and docs for: {preview}",
-        "deepseek": f"Check edge cases, performance, and failure modes for: {preview}",
-        "deepseek-api": f"Check edge cases, performance, and failure modes for: {preview}",
-        "grok": f"Explore creative solutions and rapid prototyping for: {preview}",
-        "kimi": f"Refine copy, naming, and user-facing details for: {preview}",
-        "cline": f"Execute repo automation and validation commands for: {preview}",
+        "codex": f"Implement backend logic, algorithms, and API endpoints for: {preview}",
+        "codex-cli": f"Implement backend logic, algorithms, and API endpoints for: {preview}",
+        "claude": f"Break down architecture, identify risks, and produce implementation guide for: {preview}",
+        "claude-code": f"Break down architecture, identify risks, and produce implementation guide for: {preview}",
+        "copilot": f"Write tests, documentation, and integration glue for: {preview}",
+        "copilot-cli": f"Write tests, documentation, and integration glue for: {preview}",
+        "deepseek": f"Review edge cases, performance, and failure modes for: {preview}",
+        "deepseek-api": f"Review edge cases, performance, and failure modes for: {preview}",
+        "grok": f"Explore creative solutions and rapid-prototype concepts for: {preview}",
+        "kimi": f"Refine copy, naming conventions, and user-facing language for: {preview}",
+        "cline": f"Execute repo automation, shell scripts, and CI configuration for: {preview}",
     }
     return templates.get(agent_id, f"Work on your assigned slice of: {preview}")
 
 
+# ---------------------------------------------------------------------------
+# Default file ownership (heuristic, used when LLM omits owns_files)
+# ---------------------------------------------------------------------------
+
+_AGENT_DEFAULT_FILES: Dict[str, List[str]] = {
+    "claude": ["architecture.md"],
+    "claude-code": ["architecture.md"],
+    "gemini": ["ui-design.md"],
+    "gemini-cli": ["ui-design.md"],
+    "codex": ["implementation-notes.md"],
+    "codex-cli": ["implementation-notes.md"],
+    "copilot": ["tests-and-docs.md"],
+    "copilot-cli": ["tests-and-docs.md"],
+    "deepseek": ["review.md"],
+    "cline": ["automation.md"],
+    "grok": ["concepts.md"],
+}
+
+
+# ---------------------------------------------------------------------------
+# Local (offline) division builder
+# ---------------------------------------------------------------------------
+
 def local_divisions(ctx: SharedContext, limit: int = 6) -> List[TaskDivision]:
-    """Deterministic split across enabled CLI agents. All divisions are dispatched simultaneously."""
+    """
+    Deterministic split across enabled CLI agents.
+    Group 0 agents all run in parallel; each owns a distinct default file.
+    """
     divisions: List[TaskDivision] = []
+    used_files: Set[str] = set()
+
     for i, agent in enumerate(ctx.enabled_agents[:limit]):
         short = agent.get("name", "agent")
+        default_files = [
+            f for f in _AGENT_DEFAULT_FILES.get(short, [f"{short}-output.md"])
+            if f not in used_files
+        ]
+        if not default_files:
+            default_files = [f"{short}-output-{i}.md"]
+        used_files.update(default_files)
+
         divisions.append(
             TaskDivision(
                 agent=agent.get("display_name", short),
@@ -158,10 +267,16 @@ def local_divisions(ctx: SharedContext, limit: int = 6) -> List[TaskDivision]:
                 color=AGENT_COLORS.get(short, "#6366f1"),
                 task=_task_for_agent(short, ctx.user_message),
                 status="running" if i == 0 else "queued",
+                parallel_group=0,
+                owns_files=default_files,
             )
         )
     return divisions
 
+
+# ---------------------------------------------------------------------------
+# Build plan from LLM dict
+# ---------------------------------------------------------------------------
 
 def build_plan_from_dict(
     data: Dict[str, Any],
@@ -173,10 +288,32 @@ def build_plan_from_dict(
 ) -> OrchestratorPlan:
     raw_divs = data.get("divisions") or []
     divisions: List[TaskDivision] = []
+    used_files: Set[str] = set()
+
     for d in raw_divs:
         if not isinstance(d, dict):
             continue
         short = str(d.get("short") or d.get("agent") or "agent")
+
+        # Resolve owns_files — deduplicate against already-claimed paths
+        raw_owns = list(d.get("owns_files") or [])
+        owns: List[str] = []
+        for path in raw_owns:
+            if path and path not in used_files:
+                owns.append(path)
+                used_files.add(path)
+
+        # If LLM gave no owns_files, assign a default unique file
+        if not owns:
+            defaults = [
+                f for f in _AGENT_DEFAULT_FILES.get(short, [f"{short}-output.md"])
+                if f not in used_files
+            ]
+            if not defaults:
+                defaults = [f"{short}-output-{len(divisions)}.md"]
+            owns = defaults[:1]
+            used_files.update(owns)
+
         divisions.append(
             TaskDivision(
                 agent=str(d.get("agent") or short),
@@ -184,11 +321,25 @@ def build_plan_from_dict(
                 color=str(d.get("color") or AGENT_COLORS.get(short, "#6366f1")),
                 task=str(d.get("task") or _task_for_agent(short, ctx.user_message)),
                 status=str(d.get("status") or "queued"),
+                parallel_group=int(d.get("parallel_group") or 0),
+                depends_on=[str(x) for x in (d.get("depends_on") or [])],
+                owns_files=owns,
+                reads_files=[str(x) for x in (d.get("reads_files") or [])],
             )
         )
+
     no_delegation = bool(data.get("no_delegation", False))
     if not divisions and ctx.enabled_agents and not no_delegation and "divisions" not in data:
         divisions = local_divisions(ctx)
+
+    # Final conflict check (safety net — LLM may still slip up)
+    conflicts = _validate_no_file_conflicts(divisions)
+    if conflicts:
+        import logging
+        logging.getLogger(__name__).warning(
+            "File ownership conflicts detected in LLM plan, auto-resolving: %s", conflicts
+        )
+        # Re-resolve by re-running build logic (already done above via used_files tracking)
 
     content = str(data.get("content") or "").strip()
     if not content:
@@ -209,6 +360,10 @@ def build_plan_from_dict(
         cost_estimate=cost,
     )
 
+
+# ---------------------------------------------------------------------------
+# Offline plan (no LLM available)
+# ---------------------------------------------------------------------------
 
 def offline_plan(ctx: SharedContext, reason: str) -> OrchestratorPlan:
     divisions = local_divisions(ctx)

@@ -52,7 +52,17 @@ class OrchestratorMessage:
 
 @dataclass
 class TaskDivision:
-    """Work unit assigned to a CLI agent."""
+    """
+    Work unit assigned to a CLI agent.
+
+    Ownership and dependency fields prevent conflicts between agents:
+      - owns_files:  relative paths (under artifact_base) this agent WRITES.
+                     No two divisions in the same plan may share an owned path.
+      - reads_files: relative paths this agent reads (produced by another agent).
+      - depends_on:  short IDs of agents that must complete before this one starts.
+      - parallel_group: 0 = runs immediately/in parallel with other group-0 tasks;
+                        1+ = runs after the previous group finishes.
+    """
 
     agent: str
     short: str
@@ -61,6 +71,9 @@ class TaskDivision:
     status: str = "queued"
     provider_id: Optional[int] = None
     parallel_group: int = 0
+    depends_on: List[str] = field(default_factory=list)
+    owns_files: List[str] = field(default_factory=list)
+    reads_files: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -76,6 +89,9 @@ class OrchestratorPlan:
     tokens_used: int = 0
     cost_estimate: float = 0.0
     metadata: Dict[str, Any] = field(default_factory=dict)
+    # Resolved path of the shared artifact directory for this session.
+    # Set by the orchestrator route when a workspace is active.
+    artifact_base: str = ""
 
     def to_metadata_dict(self) -> Dict[str, Any]:
         return {
@@ -88,10 +104,14 @@ class OrchestratorPlan:
                     "task": d.task,
                     "status": d.status,
                     "parallel_group": d.parallel_group,
+                    "depends_on": d.depends_on,
+                    "owns_files": d.owns_files,
+                    "reads_files": d.reads_files,
                 }
                 for d in self.divisions
             ],
             "artifacts": self.artifacts,
+            "artifact_base": self.artifact_base,
             "model": self.model,
             "provider_id": self.provider_id,
             **self.metadata,

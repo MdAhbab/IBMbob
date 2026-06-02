@@ -11,7 +11,11 @@ from backend.api.routes import (
     runtimes,
     workspace,
     analytics,
-    settings
+    settings,
+    onboarding,
+    agents,
+    tools,
+    installer,
 )
 
 __all__ = [
@@ -21,6 +25,9 @@ __all__ = [
     "runtimes",
     "workspace",
     "analytics",
-    "settings"
+    "settings",
+    "onboarding",
+    "agents",
+    "tools",
+    "installer",
 ]
-

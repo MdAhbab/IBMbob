@@ -1,17 +1,30 @@
 {
-  "version": "1.0.0",
-  "last_updated": "2026-05-16",
+  "version": "1.1.0",
+  "last_updated": "2026-06-03",
+  "install_prefix": "~/.ai-clis",
+  "installation_notes": {
+    "node_required": "Node.js 18+ is required to install AI CLI tools",
+    "install_location": "All CLIs are installed to ~/.ai-clis (user home, no admin needed)",
+    "path_note": "The app automatically adds ~/.ai-clis/node_modules/.bin to PATH when launching CLI processes",
+    "authentication": "Some CLIs require API keys or browser auth after installation",
+    "fallback": "If automatic installation fails, use the fallback_doc_url for manual instructions"
+  },
   "clis": [
     {
       "name": "Claude Code",
       "slug": "claude-code",
       "package": "@anthropic-ai/claude-code",
-      "install_command": "npm install -g @anthropic-ai/claude-code",
-      "verify_command": "claude-code --version",
+      "npm_package": "@anthropic-ai/claude-code",
+      "bin_name": "claude",
+      "install_command": "npm install --prefix ~/.ai-clis @anthropic-ai/claude-code",
+      "verify_command": "claude --version",
+      "node_required": true,
+      "node_min_version": 18,
       "required": true,
       "priority": 1,
       "description": "Anthropic's Claude AI coding assistant",
-      "specialties": ["general", "refactoring", "documentation"],
+      "specialties": ["general", "refactoring", "documentation", "architecture"],
+      "fallback_doc_url": "https://docs.anthropic.com/en/docs/claude-code",
       "rate_limits": {
         "daily": 1000,
         "hourly": 100
@@ -21,12 +34,16 @@
       "name": "Grok API",
       "slug": "grok",
       "package": "n/a",
+      "npm_package": null,
+      "bin_name": null,
       "install_command": "Configure GROK_API_KEY in Settings",
       "verify_command": "n/a",
+      "node_required": false,
       "required": false,
       "priority": 2,
-      "description": "xAI Grok — orchestrator LLM (API key, no local CLI)",
+      "description": "xAI Grok — orchestrator LLM (API key only, no local CLI binary)",
       "specialties": ["planning", "routing", "orchestration"],
+      "fallback_doc_url": "https://console.x.ai/",
       "rate_limits": {
         "daily": 500,
         "hourly": 50
@@ -36,12 +53,17 @@
       "name": "Gemini CLI",
       "slug": "gemini-cli",
       "package": "@google/gemini-cli",
-      "install_command": "npm install -g @google/gemini-cli",
+      "npm_package": "@google/gemini-cli",
+      "bin_name": "gemini",
+      "install_command": "npm install --prefix ~/.ai-clis @google/gemini-cli",
       "verify_command": "gemini --version",
+      "node_required": true,
+      "node_min_version": 18,
       "required": false,
       "priority": 3,
       "description": "Google's Gemini AI coding assistant",
-      "specialties": ["frontend", "ui", "design"],
+      "specialties": ["frontend", "ui", "design", "typescript"],
+      "fallback_doc_url": "https://github.com/google-gemini/gemini-cli",
       "rate_limits": {
         "daily": 2000,
         "hourly": 200
@@ -51,12 +73,17 @@
       "name": "GitHub Copilot CLI",
       "slug": "copilot-cli",
       "package": "@github/copilot-cli",
-      "install_command": "npm install -g @github/copilot-cli",
-      "verify_command": "copilot --version",
+      "npm_package": "@github/copilot-cli",
+      "bin_name": "github-copilot-cli",
+      "install_command": "npm install --prefix ~/.ai-clis @github/copilot-cli",
+      "verify_command": "github-copilot-cli --version",
+      "node_required": true,
+      "node_min_version": 18,
       "required": false,
       "priority": 4,
       "description": "GitHub Copilot command-line interface",
-      "specialties": ["general", "refactoring"],
+      "specialties": ["general", "refactoring", "tests", "documentation"],
+      "fallback_doc_url": "https://docs.github.com/en/copilot/github-copilot-in-the-cli",
       "rate_limits": {
         "daily": 1500,
         "hourly": 150
@@ -65,28 +92,37 @@
     {
       "name": "Codex CLI",
       "slug": "codex-cli",
-      "package": "@openai/codex-cli",
-      "install_command": "npm install -g @openai/codex-cli",
+      "package": "@openai/codex",
+      "npm_package": "@openai/codex",
+      "bin_name": "codex",
+      "install_command": "npm install --prefix ~/.ai-clis @openai/codex",
       "verify_command": "codex --version",
+      "node_required": true,
+      "node_min_version": 18,
       "required": false,
       "priority": 5,
       "description": "OpenAI Codex coding assistant",
-      "specialties": ["backend", "algorithm", "optimization"],
+      "specialties": ["backend", "algorithm", "optimization", "api"],
+      "fallback_doc_url": "https://github.com/openai/codex",
       "rate_limits": {
         "daily": 1000,
         "hourly": 100
       }
     },
     {
-      "name": "DeepSeek",
+      "name": "DeepSeek API",
       "slug": "deepseek",
-      "package": "@deepseek/cli",
-      "install_command": "npm install -g @deepseek/cli",
-      "verify_command": "deepseek --version",
+      "package": "n/a",
+      "npm_package": null,
+      "bin_name": null,
+      "install_command": "Configure DEEPSEEK_API_KEY in Settings",
+      "verify_command": "n/a",
+      "node_required": false,
       "required": false,
       "priority": 6,
-      "description": "DeepSeek AI coding assistant",
-      "specialties": ["algorithm", "optimization", "backend"],
+      "description": "DeepSeek AI — orchestrator LLM (API key only, no local CLI binary)",
+      "specialties": ["algorithm", "optimization", "backend", "math"],
+      "fallback_doc_url": "https://platform.deepseek.com/",
       "rate_limits": {
         "daily": 800,
         "hourly": 80
@@ -96,22 +132,21 @@
       "name": "Cline",
       "slug": "cline",
       "package": "@cline/cli",
-      "install_command": "npm install -g @cline/cli",
+      "npm_package": "@cline/cli",
+      "bin_name": "cline",
+      "install_command": "npm install --prefix ~/.ai-clis @cline/cli",
       "verify_command": "cline --version",
+      "node_required": true,
+      "node_min_version": 18,
       "required": false,
       "priority": 7,
-      "description": "Cline AI coding assistant",
-      "specialties": ["general", "frontend"],
+      "description": "Cline AI coding assistant — autonomous agentic coding",
+      "specialties": ["general", "frontend", "automation", "shell"],
+      "fallback_doc_url": "https://github.com/cline/cline",
       "rate_limits": {
         "daily": 600,
         "hourly": 60
       }
     }
-  ],
-  "installation_notes": {
-    "node_required": "Node.js 18+ and npm are required to install AI CLI tools",
-    "global_install": "All CLIs are installed globally using npm",
-    "authentication": "Some CLIs may require API keys or authentication after installation",
-    "fallback": "If automatic installation fails, manual installation instructions will be provided"
-  }
+  ]
 }
