@@ -5,7 +5,9 @@ Central orchestrator engine — task decomposition, routing, fallback, aggregati
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import sys
 from typing import Any, Dict, List, Optional
 
 import aiosqlite
@@ -26,6 +28,38 @@ logger = logging.getLogger(__name__)
 
 # A-HIGH-04: hard ceiling on the entire LLM planning chain (seconds).
 ORCHESTRATOR_TIMEOUT_S = 90
+
+
+if sys.version_info >= (3, 11):
+    _planning_timeout = asyncio.timeout  # type: ignore[attr-defined]
+else:
+    @contextlib.asynccontextmanager
+    async def _planning_timeout(delay: float):
+        """Backport of asyncio.timeout() for Python 3.8–3.10.
+
+        Cancels the current task after `delay` seconds and raises TimeoutError,
+        matching the 3.11+ asyncio.timeout context-manager semantics so the
+        downstream `except TimeoutError` handler works on every supported runtime.
+        """
+        task = asyncio.current_task()
+        loop = asyncio.get_event_loop()
+        timed_out = False
+
+        def _on_timeout() -> None:
+            nonlocal timed_out
+            timed_out = True
+            if task is not None:
+                task.cancel()
+
+        handle = loop.call_later(delay, _on_timeout)
+        try:
+            yield
+        except asyncio.CancelledError:
+            if timed_out:
+                raise TimeoutError() from None
+            raise
+        finally:
+            handle.cancel()
 
 # Map DB provider `name` to orchestrator LLM registry id.
 LLM_PROVIDER_ALIASES = {
@@ -243,8 +277,9 @@ class OrchestratorEngine:
             return plan
 
         try:
-            # A-HIGH-04: hard ceiling on the entire LLM planning chain.
-            async with asyncio.timeout(ORCHESTRATOR_TIMEOUT_S):
+            # A-HIGH-04: hard ceiling on the entire LLM planning chain
+            # (version-safe: native asyncio.timeout on 3.11+, backport below).
+            async with _planning_timeout(ORCHESTRATOR_TIMEOUT_S):
                 result, decision = await self.router.complete_with_fallback(
                     llm_configs,
                     messages,

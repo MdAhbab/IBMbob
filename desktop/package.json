@@ -23,6 +23,7 @@
     "http-proxy": "^1.18.1"
   },
   "devDependencies": {
+    "@electron/notarize": "^2.5.0",
     "@types/http-proxy": "^1.17.16",
     "@types/node": "^22.13.10",
     "concurrently": "^9.1.2",
@@ -40,6 +41,7 @@
       "output": "release",
       "buildResources": "build"
     },
+    "afterSign": "scripts/notarize.js",
     "files": [
       "dist/**/*",
       "package.json"
@@ -65,6 +67,13 @@
       {
         "from": "../shared",
         "to": "shared",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "resources/python",
+        "to": "python",
         "filter": [
           "**/*"
         ]
@@ -100,6 +109,13 @@
         }
       ],
       "category": "public.app-category.developer-tools",
+      "artifactName": "AI-Orchestrator-${version}-${arch}.${ext}",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist"
+    },
+    "dmg": {
       "artifactName": "AI-Orchestrator-${version}-${arch}.${ext}"
     },
     "nsis": {

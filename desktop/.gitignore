@@ -1,3 +1,9 @@
 node_modules/
 dist/
 release/
+
+# Bundled Python runtime (C-CRIT-01) — populated by packaging/fetch_python.py.
+# Keep the folder + docs, ignore the downloaded interpreter payload.
+resources/python/*
+!resources/python/.gitkeep
+!resources/python/README.md

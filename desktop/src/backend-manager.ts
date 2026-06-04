@@ -5,6 +5,7 @@ import http from "http";
 import net from "net";
 import path from "path";
 import {
+  getBundledPython,
   getCacheDir,
   getDataDir,
   getProjectRoot,
@@ -38,6 +39,11 @@ function readOrCreateSecret(fileName: string, byteLength = 32): string {
  * Used only during venv bootstrap.
  */
 function resolveSystemPython(): string | null {
+  // C-CRIT-01: prefer a bundled interpreter so the installer is self-contained
+  // and does not require the user to have Python installed.
+  const bundled = getBundledPython();
+  if (bundled) return bundled;
+
   const candidates =
     process.platform === "win32"
       ? ["py", "python", "python3"]

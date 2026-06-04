@@ -36,7 +36,7 @@ WHAT GETS INSTALLED
 FIRST RUN
 ---------
 1. Launch AI CLI Orchestrator from Start Menu or Desktop
-2. Your browser will open automatically
+2. The app window opens (no browser needed — it is a native desktop app)
 3. The dashboard will show "Initializing Environment"
 4. AI CLI tools will be downloaded automatically (2-3 minutes)
 5. Once complete, you're ready to start orchestrating!
@@ -73,8 +73,8 @@ If AI CLIs don't install:
 
 DOCUMENTATION
 -------------
-Full documentation: https://github.com/yourusername/ai-cli-orchestrator
-Issues & Support: https://github.com/yourusername/ai-cli-orchestrator/issues
+Full documentation: https://github.com/MdAhbab/IBMbob
+Issues & Support: https://github.com/MdAhbab/IBMbob/issues
 
 UNINSTALLING
 ------------

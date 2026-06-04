@@ -46,6 +46,23 @@ export function getTempDir(): string {
   return root;
 }
 
+/**
+ * C-CRIT-01: Path to a bundled, relocatable Python interpreter, if one was
+ * shipped with the app (e.g. python-build-standalone under resources/python).
+ * Returns null when no bundled runtime is present so callers fall back to the
+ * system interpreter. Layout matches python-build-standalone:
+ *   Windows: <resources>/python/python.exe
+ *   Unix:    <resources>/python/bin/python3
+ */
+export function getBundledPython(): string | null {
+  const base = path.join(getProjectRoot(), "python");
+  const candidate =
+    process.platform === "win32"
+      ? path.join(base, "python.exe")
+      : path.join(base, "bin", "python3");
+  return fs.existsSync(candidate) ? candidate : null;
+}
+
 export function resolvePythonExecutable(): string | null {
   const backendDir = getBackendDir();
   const venvPython =
@@ -53,8 +70,15 @@ export function resolvePythonExecutable(): string | null {
       ? path.join(backendDir, "venv", "Scripts", "python.exe")
       : path.join(backendDir, "venv", "bin", "python");
 
+  // A venv (with deps installed) wins when present.
   if (fs.existsSync(venvPython)) {
     return venvPython;
+  }
+
+  // Otherwise prefer a bundled interpreter so the app is self-contained.
+  const bundled = getBundledPython();
+  if (bundled) {
+    return bundled;
   }
 
   if (process.platform === "win32") {

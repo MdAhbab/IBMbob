@@ -1,135 +1,97 @@
-# AI CLI Orchestrator - Installer
+# AI CLI Orchestrator — Packaging
 
-Build production-ready installers for the AI Orchestrator main app.
+Builds the production desktop installers using **electron-builder**. Python
+backend source and the built frontend are bundled via `extraResources` — there
+is no PyInstaller step.
 
-> **Primary Windows pipeline:** `windows/setup.iss`  
-> `windows/installer.iss` is deprecated (legacy IBM Bob paths).
-
-## Directory structure
-
-```
-release/installer/
-├── backend/          # PyInstaller packaging (bundles repo backend/)
-├── windows/          # Inno Setup (setup.iss)
-├── macos/            # DMG creation (create_dmg.sh)
-├── bootstrapper/     # CLI dependency manager
-├── launcher/         # Windows tray launcher
-├── workspace/        # Workspace templates
-├── dist/             # Build output (gitignored)
-└── version.json      # Version configuration
-```
-
-## Quick start
-
-### Prerequisites
-
-**Windows builds:**
-- Python 3.11+
-- PyInstaller: `pip install pyinstaller`
-- Inno Setup 6.x: https://jrsoftware.org/isdl.php
-- Place `icon.ico` in `windows/` before running Inno Setup
-
-**macOS builds:**
-- Python 3.11+
-- PyInstaller
-- Xcode Command Line Tools: `xcode-select --install`
-
-**Both:**
-- Node.js 18+ (CLI bootstrapping)
-- Main backend deps: `pip install -r ../../backend/requirements.txt`
-- Installer build deps: `pip install -r backend/requirements.txt`
-
-### Build commands
-
-```bash
-# From release/installer/
-python build.py
-
-# Backend executable only
-cd backend
-python build_backend.py
-
-# Windows installer (after backend build)
-cd ../windows
-python build_windows.py
-
-# macOS DMG
-cd ../macos
-bash create_dmg.sh
-```
+> The legacy PyInstaller + Inno Setup pipeline (`setup.iss`, `create_dmg.sh`,
+> `build_windows.py`, `launcher/`) was removed (audit C-HIGH-02). `build.py` is
+> the single source of truth.
 
 ## What gets built
 
-| Artifact | Path |
-|----------|------|
-| Backend exe | `backend/dist/orchestrator-backend.exe` |
-| Windows installer | `dist/windows/orchestrator-setup.exe` |
-| macOS DMG | `dist/macos/` (via `create_dmg.sh`) |
+| Platform | Target | Artifact |
+|----------|--------|----------|
+| Windows  | NSIS   | `AI-Orchestrator-Setup-${version}.exe` (x64) |
+| macOS    | DMG    | `AI-Orchestrator-${version}-${arch}.dmg` (x64 + arm64) |
+| Linux    | AppImage + deb | `AI-Orchestrator-${version}-${arch}.AppImage`, `.deb` |
 
-PyInstaller resolves the **repo root** (`parents[2]` from `backend/build_backend.py`) and bundles `backend/` with entrypoint `backend.main:app`.
+Output lands in `desktop/release/`. Configuration lives in
+[`desktop/package.json`](../desktop/package.json) under `build`.
 
-## Component notes
-
-### Backend packaging
-
-- Spec: `backend/pyinstaller.spec`
-- Packaged launcher: `backend/main.py` imports `backend.main:app`
-- Requirements synced from `../../backend/requirements.txt`
-
-### Windows installer
-
-- Use **`windows/setup.iss`** (license: `../../../LICENSE` at repo root)
-- Legacy `installer.iss` kept with deprecation comment only
-
-### macOS
-
-- Script name: **`macos/create_dmg.sh`** (not `build_macos.sh`)
-
-### CLI bootstrapper
-
-Edit `bootstrapper/cli_registry.json` to add or update AI CLI install definitions.
-
-## Testing
+## Quick start
 
 ```bash
-# Test packaged backend
-cd backend/dist
-./orchestrator-backend.exe   # Windows
-./orchestrator-backend       # Linux/macOS binary
-
-# Test Windows installer
-cd ../dist/windows
-./orchestrator-setup.exe
+# From repo root — builds backend venv, frontend, and the installer for the host OS
+python packaging/build.py
 ```
 
-## Troubleshooting
+`build.py` runs three steps: (1) `packaging/backend/build_backend.py` (venv +
+deps), (2) `npm run build` in `frontend/`, (3) `npm run dist -- --win|--mac|--linux`
+in `desktop/`.
+
+## Prerequisites
+
+- **Node.js 18+** and npm
+- **Python 3.8+** (for the backend venv build step)
+- Build **on** each target OS (electron-builder does not cross-compile NSIS/DMG)
+
+## Self-contained installer (optional — bundles Python)
+
+By default the installed app uses the end user's system Python to create a venv
+on first launch. To remove that requirement (audit C-CRIT-01), bundle a
+relocatable Python before building:
 
 ```bash
-# Clean PyInstaller output
-rm -rf backend/build backend/dist
-python backend/build_backend.py
-
-# Reinstall deps
-pip install -r ../../backend/requirements.txt
-pip install -r backend/requirements.txt
+python packaging/fetch_python.py            # downloads into desktop/resources/python
+python packaging/build.py
 ```
 
-## Related paths
+`desktop/src/paths.ts → getBundledPython()` then prefers the bundled interpreter,
+falling back to system Python when absent.
 
-| Resource | Location |
-|----------|----------|
-| Main backend source | `../../backend/` |
-| Main frontend source | `../../frontend/` |
-| Downloader site | `../../downloader_page/` |
-| Shared workspace | `../../shared/` |
-| Architecture plan | `../../docs/ARCHITECTURE.md` |
+## Code signing & notarization (optional — audit C-CRIT-02)
 
-## Documentation
+Unsigned builds work for local testing but trigger Gatekeeper/SmartScreen
+warnings for end users. To sign:
 
-- [docs/QUICK_START.md](../../docs/QUICK_START.md) — run from source
-- [docs/PROJECT_STRUCTURE.md](../../docs/PROJECT_STRUCTURE.md) — repo layout
-- [composer_report.md](../../composer_report.md) — audit findings (installer section)
+**macOS** — provide a Developer ID cert (keychain or `CSC_LINK`/`CSC_KEY_PASSWORD`)
+and export, then build:
 
----
+```bash
+export APPLE_ID="you@example.com"
+export APPLE_APP_SPECIFIC_PASSWORD="abcd-efgh-ijkl-mnop"
+export APPLE_TEAM_ID="XXXXXXXXXX"
+python packaging/build.py
+```
 
-Last Updated: 2026-05-27
+Hardened-runtime entitlements: [`desktop/build/entitlements.mac.plist`](../desktop/build/entitlements.mac.plist).
+Notarization runs via the `afterSign` hook [`desktop/scripts/notarize.js`](../desktop/scripts/notarize.js)
+(a no-op when the Apple env vars are unset).
+
+**Windows** — set `CSC_LINK` (path/URL to `.pfx`) and `CSC_KEY_PASSWORD`;
+electron-builder signs the NSIS installer automatically.
+
+## Auto-update
+
+`desktop/src/updater.ts` checks GitHub Releases (`MdAhbab/IBMbob`). Publish
+artifacts whose names match the `artifactName` patterns above; macOS auto-update
+requires signed + notarized builds.
+
+## Directory layout
+
+| Path | Purpose |
+|------|---------|
+| `build.py` | Top-level build orchestration (electron-builder) |
+| `fetch_python.py` | Optional: download relocatable Python for self-contained builds |
+| `backend/` | Backend venv build helper + requirements |
+| `bootstrapper/cli_registry.json` | AI CLI install definitions used by the installer service |
+| `windows/README.txt` | End-user install/troubleshooting guide (shipped) |
+| `workspace/` | First-run workspace templates |
+| `version.json` | Release version + minimum requirements |
+
+## Related
+
+- [docs/QUICK_START.md](../docs/QUICK_START.md) — run from source
+- [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) — system architecture
+- [audit.md](../audit.md) — system audit this packaging setup resolves

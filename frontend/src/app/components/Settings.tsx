@@ -173,7 +173,7 @@ export function Settings({
               </button>
             ))}
           </div>
-        </aside>   </aside>
+        </aside>
 
         <div className="scrollbar-thin flex-1 overflow-y-auto px-4 pb-44 pt-5 sm:px-6 sm:pb-48 md:px-8 md:pt-7">
           <motion.div

@@ -7,10 +7,11 @@ import { Download, Apple, Terminal, Github } from "lucide-react";
 const RELEASE_VERSION = "0.8.1";
 const RELEASES_BASE = `https://github.com/MdAhbab/IBMbob/releases/download/v${RELEASE_VERSION}`;
 
+// Asset names must match the `artifactName` patterns in desktop/package.json.
 const DOWNLOAD_LINKS: Record<string, string> = {
   Windows: `${RELEASES_BASE}/AI-Orchestrator-Setup-${RELEASE_VERSION}.exe`,
   macOS:   `${RELEASES_BASE}/AI-Orchestrator-${RELEASE_VERSION}-arm64.dmg`,
-  Linux:   `${RELEASES_BASE}/AI-Orchestrator-${RELEASE_VERSION}.AppImage`,
+  Linux:   `${RELEASES_BASE}/AI-Orchestrator-${RELEASE_VERSION}-x64.AppImage`,
 };
 
 // ─── OS detection ────────────────────────────────────────────────────────────
