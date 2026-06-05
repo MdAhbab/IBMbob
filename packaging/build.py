@@ -7,6 +7,7 @@ No PyInstaller required — Python source is bundled via extraResources.
 import sys
 import subprocess
 import json
+import os
 import platform
 from pathlib import Path
 from datetime import datetime
@@ -85,18 +86,27 @@ class InstallerBuilder:
         """Build the Electron desktop app with electron-builder."""
         print("\n[3/3] Building desktop installer")
         print("-" * 70)
+        env = os.environ.copy()
         if self.current_platform == 'windows':
             target_flag = ['--win']
+            extra_args = self.windows_unsigned_local_args()
         elif self.current_platform == 'darwin':
             target_flag = ['--mac']
+            extra_args = []
         else:
             target_flag = ['--linux']
+            extra_args = []
+
+        if extra_args:
+            env.setdefault("CSC_IDENTITY_AUTO_DISCOVERY", "false")
+            print("  INFO Windows unsigned local build: skipping executable signing/resource edit")
 
         try:
             subprocess.run(
-                ["npm", "run", "dist", "--", *target_flag],
+                ["npm", "run", "dist", "--", *target_flag, *extra_args],
                 cwd=str(self.desktop_dir),
                 check=True,
+                env=env,
                 shell=(self.current_platform == 'windows'),
             )
             print("  OK  desktop installer built")
@@ -104,6 +114,46 @@ class InstallerBuilder:
         except subprocess.CalledProcessError as e:
             print(f"  ERROR desktop build failed (exit {e.returncode})")
             return False
+
+    def windows_unsigned_local_args(self):
+        """
+        Non-admin Windows shells can fail while extracting electron-builder's
+        winCodeSign helper because that archive contains symlinks. Unsigned
+        local installers do not need executable signing/resource editing.
+        """
+        if self.has_windows_signing_config():
+            return []
+        return ["--config.win.signAndEditExecutable=false"]
+
+    def has_windows_signing_config(self):
+        signing_env = (
+            "WIN_CSC_LINK",
+            "CSC_LINK",
+            "AZURE_TENANT_ID",
+            "AZURE_CLIENT_ID",
+            "AZURE_CLIENT_SECRET",
+        )
+        if any(os.environ.get(name) for name in signing_env):
+            return True
+
+        package_file = self.desktop_dir / "package.json"
+        try:
+            with open(package_file, "r", encoding="utf-8") as f:
+                metadata = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return False
+
+        win_config = metadata.get("build", {}).get("win", {}) or {}
+        signtool = win_config.get("signtoolOptions", {}) or {}
+        signing_keys = (
+            "cscLink",
+            "certificateFile",
+            "certificateSha1",
+            "certificateSubjectName",
+            "sign",
+            "azureSignOptions",
+        )
+        return any(win_config.get(key) or signtool.get(key) for key in signing_keys)
 
     def print_summary(self, venv_ok, frontend_ok, desktop_ok):
         print("\n" + "=" * 70)

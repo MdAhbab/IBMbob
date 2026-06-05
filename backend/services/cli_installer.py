@@ -109,12 +109,17 @@ class CLIStatus:
 def detect_node() -> NodeStatus:
     """Check if Node.js ≥ 18 and npm are available."""
     try:
+        node_cmd = shutil.which("node")
+        npm_cmd = shutil.which("npm")
+        if not node_cmd or not npm_cmd:
+            return NodeStatus(installed=False, error="node or npm not found in PATH")
+
         node_result = subprocess.run(
-            ["node", "--version"],
+            [node_cmd, "--version"],
             capture_output=True, text=True, timeout=8
         )
         npm_result = subprocess.run(
-            ["npm", "--version"],
+            [npm_cmd, "--version"],
             capture_output=True, text=True, timeout=8
         )
         if node_result.returncode != 0 or npm_result.returncode != 0:

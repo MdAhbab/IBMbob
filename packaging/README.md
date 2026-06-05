@@ -30,6 +30,11 @@ python packaging/build.py
 deps), (2) `npm run build` in `frontend/`, (3) `npm run dist -- --win|--mac|--linux`
 in `desktop/`.
 
+On Windows, when no signing certificate is configured, `build.py` creates an
+unsigned local installer and passes
+`--config.win.signAndEditExecutable=false`. This avoids electron-builder's
+`winCodeSign` symlink extraction failure in non-admin shells.
+
 ## Prerequisites
 
 - **Node.js 18+** and npm
@@ -71,6 +76,10 @@ Notarization runs via the `afterSign` hook [`desktop/scripts/notarize.js`](../de
 
 **Windows** — set `CSC_LINK` (path/URL to `.pfx`) and `CSC_KEY_PASSWORD`;
 electron-builder signs the NSIS installer automatically.
+
+Signed Windows release builds use electron-builder's `winCodeSign` tools. If
+extracting those tools fails with a symlink privilege error, run from an
+elevated shell or enable Windows Developer Mode.
 
 ## Auto-update
 
