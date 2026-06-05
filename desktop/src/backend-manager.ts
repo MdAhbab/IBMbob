@@ -220,11 +220,15 @@ export class BackendManager {
     getCacheDir();
     getTempDir();
 
+    const desktopUiOrigins = Array.from({ length: 20 }, (_, i) => 5174 + i)
+      .flatMap((port) => [
+        `http://localhost:${port}`,
+        `http://127.0.0.1:${port}`,
+      ]);
     const corsOrigins = [
       "http://localhost:5173",
       "http://127.0.0.1:5173",
-      "http://localhost:5174",
-      "http://127.0.0.1:5174",
+      ...desktopUiOrigins,
     ].join(",");
 
     const env: NodeJS.ProcessEnv = {

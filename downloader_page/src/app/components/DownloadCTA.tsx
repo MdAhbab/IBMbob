@@ -1,5 +1,5 @@
 import { motion } from "motion/react";
-import { Download, Apple, Terminal, Github } from "lucide-react";
+import { Download, Apple, Terminal, Github, ShieldAlert } from "lucide-react";
 
 // ─── Release config ──────────────────────────────────────────────────────────
 // Update RELEASE_VERSION when cutting a new release; asset filenames must match
@@ -131,6 +131,16 @@ export function DownloadCTA() {
                   </motion.a>
                 );
               })}
+            </div>
+
+            <div className="mt-5 flex items-start gap-3 rounded-xl border border-amber-400/20 bg-amber-400/10 px-4 py-3 text-left text-sm text-amber-100">
+              <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
+              <p>
+                Windows beta builds are currently unsigned, so Edge or Chrome may show a
+                "not commonly downloaded" warning. The installer is published from the
+                project GitHub release; signed builds will remove this warning after the
+                app gains Windows reputation.
+              </p>
             </div>
 
             {/* Footer note */}

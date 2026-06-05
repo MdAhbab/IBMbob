@@ -5,13 +5,18 @@ import {
   ipcMain,
   Menu,
   nativeImage,
+  OpenDialogOptions,
   shell,
 } from "electron";
 import fs from "fs";
 import path from "path";
 import http from "http";
 import { BackendManager } from "./backend-manager";
-import { DESKTOP_UI_PORT, startStaticServer } from "./static-server";
+import {
+  DESKTOP_UI_PORT,
+  getStaticServerPort,
+  startStaticServer,
+} from "./static-server";
 import { getFrontendDistDir, getProjectRoot } from "./paths";
 import { setupAutoUpdater } from "./updater";
 
@@ -107,7 +112,7 @@ async function bootstrap(): Promise<void> {
   } else {
     try {
       uiServer = await startStaticServer(backend.baseUrl, DESKTOP_UI_PORT);
-      loadUrl = `http://127.0.0.1:${DESKTOP_UI_PORT}`;
+      loadUrl = `http://127.0.0.1:${getStaticServerPort(uiServer)}`;
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "Failed to start UI server";
@@ -136,6 +141,20 @@ const gotLock = app.requestSingleInstanceLock();
 // Expose app version synchronously to preload via ipcRenderer.sendSync
 ipcMain.on("app-version", (event) => {
   event.returnValue = app.getVersion();
+});
+
+ipcMain.handle("workspace-select-folder", async () => {
+  const options: OpenDialogOptions = {
+    title: "Select workspace folder",
+    properties: ["openDirectory", "createDirectory"],
+  };
+  const result = mainWindow
+    ? await dialog.showOpenDialog(mainWindow, options)
+    : await dialog.showOpenDialog(options);
+  if (result.canceled || result.filePaths.length === 0) {
+    return null;
+  }
+  return result.filePaths[0];
 });
 
 if (!gotLock) {

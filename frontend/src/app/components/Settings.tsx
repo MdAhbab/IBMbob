@@ -335,6 +335,15 @@ function GeneralPanel() {
                 const name = path.split(/[/\\]/).filter(Boolean).pop() || hint || "workspace";
                 setWorkspace({ path, name });
               };
+              const selectWorkspaceFolder = window.electronAPI?.selectWorkspaceFolder;
+              if (selectWorkspaceFolder) {
+                const path = await selectWorkspaceFolder();
+                if (path) {
+                  const name = path.split(/[/\\]/).filter(Boolean).pop() || "workspace";
+                  setWorkspace({ path, name });
+                }
+                return;
+              }
               try {
                 // @ts-ignore
                 if (window.showDirectoryPicker) {

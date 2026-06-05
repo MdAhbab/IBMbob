@@ -103,6 +103,16 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   const progress = Math.min(1, (step + 1) / totalSteps);
 
   const pickFolder = async () => {
+    const selectWorkspaceFolder = window.electronAPI?.selectWorkspaceFolder;
+    if (selectWorkspaceFolder) {
+      const desktopPath = await selectWorkspaceFolder();
+      if (desktopPath) {
+        setFolderPath(desktopPath);
+        setPickedFolderName("");
+      }
+      return;
+    }
+
     try {
       // @ts-ignore
       if (window.showDirectoryPicker) {

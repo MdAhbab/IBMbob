@@ -18,6 +18,16 @@ const MIME: Record<string, string> = {
 };
 
 export const DESKTOP_UI_PORT = 5174;
+const DESKTOP_UI_HOST = "127.0.0.1";
+const MAX_PORT_ATTEMPTS = 20;
+
+export function getStaticServerPort(server: http.Server): number {
+  const address = server.address();
+  if (address && typeof address === "object") {
+    return address.port;
+  }
+  return DESKTOP_UI_PORT;
+}
 
 /**
  * Serves the Vite production build and proxies /api, /health, and /ws to the backend
@@ -34,6 +44,10 @@ export function startStaticServer(
     );
   }
 
+  return listenWithPortFallback(() => createStaticServer(distDir, backendBaseUrl), port);
+}
+
+function createStaticServer(distDir: string, backendBaseUrl: string): http.Server {
   const proxy = httpProxy.createProxyServer({ ws: true, xfwd: true });
   const backendWs = backendBaseUrl.replace(/^http/, "ws");
 
@@ -71,13 +85,39 @@ export function startStaticServer(
     socket.destroy();
   });
 
-  return new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(port, "127.0.0.1", () => {
-      console.log(`[ui] http://127.0.0.1:${port}`);
-      resolve(server);
-    });
-  });
+  return server;
+}
+
+async function listenWithPortFallback(
+  createServer: () => http.Server,
+  startPort: number,
+): Promise<http.Server> {
+  for (let offset = 0; offset < MAX_PORT_ATTEMPTS; offset++) {
+    const port = startPort + offset;
+    const server = createServer();
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(port, DESKTOP_UI_HOST, () => {
+          server.off("error", reject);
+          resolve();
+        });
+      });
+      console.log(`[ui] http://${DESKTOP_UI_HOST}:${port}`);
+      return server;
+    } catch (err) {
+      server.close();
+      if ((err as NodeJS.ErrnoException).code !== "EADDRINUSE") {
+        throw err;
+      }
+      console.warn(`[ui] port ${port} is busy, trying ${port + 1}`);
+    }
+  }
+
+  throw new Error(
+    `No free UI port found from ${startPort} to ${startPort + MAX_PORT_ATTEMPTS - 1}`,
+  );
 }
 
 function serveFile(distDir: string, url: string, res: http.ServerResponse): void {

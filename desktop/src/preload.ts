@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
   /** Tell the main process to quit-and-install */
   installUpdate: () => ipcRenderer.send("update-install-now"),
+  selectWorkspaceFolder: () => ipcRenderer.invoke("workspace-select-folder"),
   /**
    * Current app version — retrieved synchronously from the main process via IPC
    * because process.env.npm_package_version is not available in packaged apps.
