@@ -62,11 +62,15 @@ _RE_RESET_AT = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 
-# "X% of (daily|weekly|monthly) limit"
+# "X% of [your|the] [daily|weekly|monthly|hourly] [usage] (limit|quota|cap)"
+# Window word is optional (group 2 may be None), and possessive/article words
+# ("your"/"the") between "of" and the window are tolerated.
 _RE_PCT_OF_LIMIT = re.compile(
     r"""
     (\d+(?:\.\d+)?)\s*%\s+of\s+
-    (daily|weekly|monthly|hourly)\s+(?:usage\s+)?limit
+    (?:your\s+|the\s+)?
+    (?:(daily|weekly|monthly|hourly)\s+)?
+    (?:usage\s+)?(?:limit|quota|cap)
     """,
     re.IGNORECASE | re.VERBOSE,
 )
@@ -135,8 +139,9 @@ def parse_usage_from_text(text: str) -> Optional[dict]:
         found_any_signal = True
         pct_raw = float(m.group(1)) / 100.0
         result["pct"] = min(pct_raw, 1.0)
-        window_word = m.group(2).lower()
-        result["quota_window"] = window_word  # e.g. "daily"
+        window_word = (m.group(2) or "").lower()
+        if window_word:
+            result["quota_window"] = window_word  # e.g. "daily"
         if pct_raw >= 1.0:
             result["exhausted"] = True
 

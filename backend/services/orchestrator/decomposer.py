@@ -85,6 +85,16 @@ OUTPUT FORMAT (strict JSON, no markdown fences)
 }
 """
 
+# Augment the base prompt with benchmark-informed routing guidance so the
+# central AI routes by real per-CLI strengths (degrades silently if absent).
+try:  # pragma: no cover - defensive
+    from .benchmarks import routing_guidance_block as _routing_guidance_block
+    _bench_block = _routing_guidance_block()
+    if _bench_block:
+        ORCHESTRATOR_SYSTEM_PROMPT = ORCHESTRATOR_SYSTEM_PROMPT + _bench_block
+except Exception:
+    pass
+
 
 # ---------------------------------------------------------------------------
 # JSON parse helpers
@@ -250,7 +260,17 @@ def local_divisions(ctx: SharedContext, limit: int = 6) -> List[TaskDivision]:
     divisions: List[TaskDivision] = []
     used_files: Set[str] = set()
 
-    for i, agent in enumerate(ctx.enabled_agents[:limit]):
+    # Order enabled agents by benchmark capability so the strongest CLI leads
+    # (deterministic offline routing also benefits from the benchmarks).
+    try:
+        from .benchmarks import bench_score as _bs
+        ordered_agents = sorted(
+            ctx.enabled_agents, key=lambda a: _bs(a.get("name", "")), reverse=True
+        )
+    except Exception:
+        ordered_agents = list(ctx.enabled_agents)
+
+    for i, agent in enumerate(ordered_agents[:limit]):
         short = agent.get("name", "agent")
         default_files = [
             f for f in _AGENT_DEFAULT_FILES.get(short, [f"{short}-output.md"])

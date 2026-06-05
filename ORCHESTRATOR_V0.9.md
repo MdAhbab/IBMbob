@@ -604,3 +604,68 @@ set that ships this doc — see the commit message for what's done vs. scaffolde
   `orchestrator.ahbab.dev` makes a **GitHub Pages** deploy bind the domain automatically; it's harmless
   on Vercel/other hosts. **Demos are preserved** (`/demo` route untouched). After any downloader change,
   rebuild (`npm run build`) and redeploy — the custom domain serves the new `dist/` unchanged.
+
+---
+
+# PART I — 0.9.1 Implementation Delta (what is now DONE + remaining gaps)
+
+This section records what was actually built/verified in the 0.9.1 pass, corrects two earlier notes,
+and lists what intentionally remains for later.
+
+## I.1 Benchmark-informed routing (NEW — from "AI CLI Research and Benchmarking.md")
+- **`backend/services/orchestrator/cli_benchmarks.json`** — per-CLI capability data (SWE-bench
+  Verified/Lite, Terminal-Bench, context window, cost tier, specialties, `best_for`, a 0-100
+  `rank_score`) for all 12 researched CLIs (installable ones flagged).
+- **`backend/services/orchestrator/benchmarks.py`** — loader + `bench_score()`, `rank_eligible()`
+  (task-type boost when the task text matches a CLI's `best_for`), and `routing_guidance_block()`.
+- **Wired in:**
+  - `decomposer.py` appends the benchmark routing table to `ORCHESTRATOR_SYSTEM_PROMPT`, so the central
+    AI picks the strongest CLI per task type (e.g. frontend → gemini-cli, backend → codex-cli,
+    architecture/hard-bugs → claude-code), and `local_divisions()` orders the deterministic offline
+    split by `rank_score`.
+  - `handoff.pick_alternate()` now ranks quota-eligible alternates by benchmark, so a pre-empted task
+    hands off to the **strongest** available CLI, not just the first.
+  - Verified by smoke test: backend task → `codex-cli`, frontend task → `gemini-cli`, exhausted
+    `gemini-cli` hands off to `claude-code` (highest-ranked `ok`).
+
+## I.2 Corrections to earlier notes
+- **Migrations are AUTO-APPLIED** (earlier "apply 004 manually" was wrong). `init_db.apply_sql_migrations()`
+  runs every `migrations/*.sql` once (tracked in `schema_migrations`) and is called from `main.py`
+  lifespan startup. The real fix was **bundling** `migrations/` into the DMG (added to
+  `desktop/package.json` `extraResources`) so the packaged app can find them. Smoke test confirms
+  `task_queue` exists after a fresh `init_database`.
+- **Worker-CLI usage parsing now works** for real phrasings ("95% of your daily limit", "429",
+  "resets at 14:30", "88% of the weekly limit") — `cli_usage.parse_usage_from_text` hardened so the
+  0.90 pre-empt threshold can actually fire.
+
+## I.3 Fully self-contained macOS DMG (Part D — DONE)
+- `packaging/fetch_python.py --platform mac --arch arm64` → relocatable CPython under
+  `desktop/resources/python` (bundled via `extraResources`).
+- Backend deps installed **into the bundled Python** (`resources/python/.../site-packages`); the build
+  is therefore offline-capable with **no system Python required**.
+- `backend-manager.ts` now **skips venv creation** when the bundled Python already imports
+  `fastapi/uvicorn/aiosqlite` (self-contained path); `paths.ts` already prefers bundled Python.
+- **Free ad-hoc signing** via `desktop/scripts/afterPack.js` (`codesign --deep --force -s -`) re-seals
+  the bundle so downloaded arm64 builds avoid the "app is damaged" hard-block — **no $99 Developer ID**.
+  Users still do the one-time right-click → Open (unidentified developer) as intended.
+- Result: `AI-Orchestrator-0.9.1-arm64.dmg` bundling python+deps+migrations+backend+frontend; the
+  bundled interpreter imports all deps from inside the `.app`.
+
+## I.4 Downloader / domain
+- All download buttons use a **direct Google-Drive link** (per `DRIVE_DOWNLOAD`); **all GitHub links
+  removed** from `DownloadCTA` and `Navbar` (Star/View-source/footer). Unsigned-build notice reworded
+  for both macOS + Windows. **Live `/demo` route preserved.**
+- See **Deployment note** above + `downloader_page/README.md` "Deploy to orchestrator.ahbab.dev".
+
+## I.5 Remaining gaps (intentionally deferred — track for 1.0)
+- **LR-1** — full "central AI reviews each CLI's completed log" loop (currently division status +
+  usage are captured on exit; feeding the trimmed log back into the next planning turn is not yet wired).
+- **MU-5** — `cli_tools.run_task` has an `owns_files` hook but does **not yet hard-enforce** that an
+  agent only edits its owned files; enforce against the plan partition + artifact lock.
+- **Expand installable CLIs** — `cli_registry.json` installs 6 CLIs; the benchmark set also covers
+  Aider, Qwen, Kimi, Antigravity, Cline, Goose, Bob (reference-only today). Add installers/verbs to make
+  them first-class when desired (verbs already sketched in `cli_commands.json` `_default`).
+- **`central_ai.json` loader** — the file exists (fallback order + provider map) but the startup
+  seeder that reads it into `provider_credentials` is not yet wired; the router still uses DB/env.
+- **CI build gate** — add a GitHub Action running `npm run build` (frontend + downloader) so a
+  non-compiling UI can never ship (the 0.8.1 `Settings.tsx` blocker would have been caught).

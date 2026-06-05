@@ -41,6 +41,7 @@
       "output": "release",
       "buildResources": "build"
     },
+    "afterPack": "scripts/afterPack.js",
     "afterSign": "scripts/notarize.js",
     "files": [
       "dist/**/*",
@@ -62,6 +63,13 @@
           "!**/__pycache__/**",
           "!**/venv/**",
           "!**/.env"
+        ]
+      },
+      {
+        "from": "../migrations",
+        "to": "migrations",
+        "filter": [
+          "**/*.sql"
         ]
       },
       {

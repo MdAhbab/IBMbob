@@ -1,0 +1,146 @@
+{
+  "_comment": "Benchmark-informed routing data for the central orchestrator. Synthesized from 'AI CLI Research and Benchmarking.md' (2026-06). 'rank_score' is a single 0-100 capability index the orchestrator uses to break ties / pick the strongest eligible CLI; 'best_for' drives task-type matching. 'installable' = our algorithmic installer can set it up today; reference-only CLIs are included so the orchestrator can reason about them if the user configures them manually.",
+  "version": "1.0.0",
+  "source": "AI CLI Research and Benchmarking.md",
+  "updated": "2026-06-06",
+  "metric_notes": {
+    "swe_verified": "SWE-bench Verified % (higher better)",
+    "swe_lite": "SWE-bench Lite % (higher better)",
+    "terminal_bench": "Terminal-Bench (normalized to %; 6.8/10 = 68)",
+    "rank_score": "0-100 overall capability index used for routing tie-breaks"
+  },
+  "clis": {
+    "claude-code": {
+      "name": "Claude Code",
+      "rank_score": 88,
+      "swe_verified": 80.9,
+      "swe_verified_model_max": 87.6,
+      "swe_pro": 64.3,
+      "terminal_bench": 68,
+      "context_window": "200K-1M",
+      "cost_tier": "high",
+      "speed": "fast",
+      "specialties": ["architecture", "refactoring", "documentation", "multi-file", "complex-reasoning"],
+      "best_for": ["architecture", "refactor", "docs", "hard-bugs", "large-codebase", "planning"],
+      "installable": true
+    },
+    "gemini-cli": {
+      "name": "Gemini CLI",
+      "rank_score": 80,
+      "swe_verified": 80.6,
+      "terminal_bench": 68,
+      "context_window": "large",
+      "cost_tier": "medium",
+      "speed": "slow",
+      "specialties": ["frontend", "ui", "design", "typescript", "multimodal"],
+      "best_for": ["frontend", "ui", "design", "css", "multimodal"],
+      "installable": true,
+      "notes": "Google is migrating Gemini CLI toward the Antigravity CLI."
+    },
+    "codex-cli": {
+      "name": "Codex CLI",
+      "rank_score": 78,
+      "terminal_bench": 77.3,
+      "context_window": "medium",
+      "cost_tier": "low",
+      "speed": "medium",
+      "specialties": ["backend", "algorithms", "devops", "os-level", "file-manipulation", "optimization"],
+      "best_for": ["backend", "api", "devops", "bulk-edits", "shell", "automation"],
+      "installable": true,
+      "notes": "Favorable token economics; rarely hits request limits."
+    },
+    "copilot-cli": {
+      "name": "GitHub Copilot CLI",
+      "rank_score": 65,
+      "code_acceptance": 50,
+      "context_window": "medium",
+      "cost_tier": "medium",
+      "speed": "medium",
+      "specialties": ["tests", "documentation", "glue", "enterprise", "compliance"],
+      "best_for": ["tests", "glue", "docs", "github-integration", "compliance"],
+      "installable": true
+    },
+    "deepseek": {
+      "name": "DeepSeek (API/CLI)",
+      "rank_score": 45,
+      "swe_lite": 29.1,
+      "cache_hit_rate": 97,
+      "context_window": "medium",
+      "cost_tier": "very_low",
+      "speed": "fast",
+      "specialties": ["review", "edge-cases", "cost-efficient", "repetitive"],
+      "best_for": ["review", "edge-cases", "cheap-bulk"],
+      "installable": true
+    },
+    "grok": {
+      "name": "xAI Grok",
+      "rank_score": 60,
+      "context_window": "large",
+      "cost_tier": "medium",
+      "speed": "fast",
+      "specialties": ["planning", "routing", "orchestration"],
+      "best_for": ["orchestration", "planning", "creative"],
+      "installable": true,
+      "role": "orchestrator"
+    },
+    "qwen-code": {
+      "name": "Qwen Code CLI",
+      "rank_score": 45,
+      "swe_lite": 44.7,
+      "specialties": ["multimodal", "terminal", "memory"],
+      "best_for": ["general", "multimodal"],
+      "installable": false
+    },
+    "kimi-code": {
+      "name": "Kimi Code CLI",
+      "rank_score": 42,
+      "swe_lite": 42.0,
+      "context_window": "262K",
+      "specialties": ["large-codebase", "multilingual"],
+      "best_for": ["large-codebase", "multilingual"],
+      "installable": false
+    },
+    "aider": {
+      "name": "Aider",
+      "rank_score": 87,
+      "swe_verified": 87.6,
+      "polyglot": 88.0,
+      "specialties": ["git", "diff", "pair-programming", "precise-edits"],
+      "best_for": ["precise-edits", "git-commits", "refactor"],
+      "installable": false,
+      "notes": "BYOM; scores reflect Claude Opus 4.7 / GPT-5 backends."
+    },
+    "antigravity": {
+      "name": "Antigravity CLI",
+      "rank_score": 76,
+      "swe_verified": 76.2,
+      "specialties": ["async", "background", "parallel", "go-native"],
+      "best_for": ["parallel", "background-workflows"],
+      "installable": false
+    },
+    "cline": {
+      "name": "Cline CLI",
+      "rank_score": 55,
+      "specialties": ["ci-cd", "json-pipelines", "automation"],
+      "best_for": ["ci-cd", "automation", "structured-output"],
+      "installable": false,
+      "notes": "BYOM."
+    },
+    "goose": {
+      "name": "Goose CLI",
+      "rank_score": 55,
+      "specialties": ["mcp-extensions", "extensible"],
+      "best_for": ["mcp-extensions", "tooling"],
+      "installable": false,
+      "notes": "BYOM; performance mirrors the linked endpoint."
+    },
+    "bob": {
+      "name": "Bob CLI",
+      "rank_score": 50,
+      "specialties": ["stable-loops", "rust", "low-overhead"],
+      "best_for": ["long-running", "recursive-loops"],
+      "installable": false,
+      "notes": "BYOM Rust framework; the optional user-configurable 'bob' worker slot."
+    }
+  }
+}

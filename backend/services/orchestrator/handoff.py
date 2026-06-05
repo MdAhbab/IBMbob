@@ -140,6 +140,14 @@ def pick_alternate(
             warn_candidates.append(alt_slug)
         # 'exhausted' → not eligible
 
+    # Prefer the strongest eligible alternate by benchmark capability.
+    try:
+        from .benchmarks import rank_eligible
+        ok_candidates = rank_eligible(ok_candidates)
+        warn_candidates = rank_eligible(warn_candidates)
+    except Exception:
+        pass
+
     if ok_candidates:
         return ok_candidates[0]
     if warn_candidates:

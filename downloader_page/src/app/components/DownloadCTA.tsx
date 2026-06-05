@@ -1,17 +1,17 @@
 import { motion } from "motion/react";
-import { Download, Apple, Terminal, Github, ShieldAlert } from "lucide-react";
+import { Download, Apple, Terminal, ShieldAlert } from "lucide-react";
 
 // ─── Release config ──────────────────────────────────────────────────────────
-// Update RELEASE_VERSION when cutting a new release; asset filenames must match
-// the artifactName patterns in desktop/package.json.
 const RELEASE_VERSION = "0.9.1";
-const RELEASES_BASE = `https://github.com/MdAhbab/IBMbob/releases/download/v${RELEASE_VERSION}`;
 
-// Asset names must match the `artifactName` patterns in desktop/package.json.
+// Direct download links. Currently a Google Drive folder holding the macOS (.dmg)
+// and Windows (.exe) installers. To link a single file directly, use the Drive
+// direct-download form: https://drive.google.com/uc?export=download&id=<FILE_ID>
+const DRIVE_DOWNLOAD = "https://drive.google.com/drive/folders/1AJTGFYTia7V6eyrli1h_DwC00YGs0w5D?usp=sharing";
 const DOWNLOAD_LINKS: Record<string, string> = {
-  Windows: `${RELEASES_BASE}/AI-Orchestrator-Setup-${RELEASE_VERSION}.exe`,
-  macOS:   `${RELEASES_BASE}/AI-Orchestrator-${RELEASE_VERSION}-arm64.dmg`,
-  Linux:   `${RELEASES_BASE}/AI-Orchestrator-${RELEASE_VERSION}-x64.AppImage`,
+  Windows: DRIVE_DOWNLOAD,
+  macOS:   DRIVE_DOWNLOAD,
+  Linux:   DRIVE_DOWNLOAD,
 };
 
 // ─── OS detection ────────────────────────────────────────────────────────────
@@ -136,26 +136,16 @@ export function DownloadCTA() {
             <div className="mt-5 flex items-start gap-3 rounded-xl border border-amber-400/20 bg-amber-400/10 px-4 py-3 text-left text-sm text-amber-100">
               <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
               <p>
-                Windows beta builds are currently unsigned, so Edge or Chrome may show a
-                "not commonly downloaded" warning. The installer is published from the
-                project GitHub release; signed builds will remove this warning after the
-                app gains Windows reputation.
+                Beta builds are currently unsigned. Windows may show a "not commonly
+                downloaded" warning, and macOS may say the app is from an unidentified
+                developer — just open it via right‑click → Open (macOS) or "Keep / Run
+                anyway" (Windows). This is normal for a free beta and is safe to allow.
               </p>
             </div>
 
             {/* Footer note */}
-            <div className="mt-8 flex flex-col sm:flex-row items-center justify-center gap-4 text-base text-neutral-500">
-              <a
-                href="https://github.com/MdAhbab/IBMbob"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1.5 hover:text-white transition-colors"
-              >
-                <Github className="w-4 h-4" />
-                <span>View source on GitHub</span>
-              </a>
-              <span className="hidden sm:inline text-neutral-700">·</span>
-              <span>MIT licensed · v{RELEASE_VERSION}</span>
+            <div className="mt-8 flex items-center justify-center gap-2 text-base text-neutral-500">
+              <span>Free during beta · MIT licensed · v{RELEASE_VERSION}</span>
             </div>
           </div>
         </motion.div>
@@ -174,39 +164,10 @@ export function Footer() {
           </div>
           <span>© 2026 AI CLI Orchestrator. Built by devs, for devs.</span>
         </div>
-        <div className="flex items-center gap-6">
-          <a
-            href="https://github.com/MdAhbab/IBMbob/blob/main/README.md"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="hover:text-white transition-colors"
-          >
-            Docs
-          </a>
-          <a
-            href="https://github.com/MdAhbab/IBMbob"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="hover:text-white transition-colors"
-          >
-            GitHub
-          </a>
-          <a
-            href="https://github.com/MdAhbab/IBMbob/discussions"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="hover:text-white transition-colors"
-          >
-            Discussions
-          </a>
-          <a
-            href="https://github.com/MdAhbab/IBMbob/blob/main/LICENSE"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="hover:text-white transition-colors"
-          >
-            License
-          </a>
+        <div className="flex items-center gap-4">
+          <span>Free during beta</span>
+          <span className="text-neutral-700">·</span>
+          <span>MIT Licensed</span>
         </div>
       </div>
     </footer>

@@ -70,6 +70,26 @@ export function ensureBackendVenv(
 ): boolean {
   const log = onProgress ?? ((m: string) => console.log(`[venv] ${m}`));
 
+  // Fully self-contained path: if a bundled Python already has the backend deps
+  // baked in (resources/python populated at build time), skip the venv entirely
+  // so first launch needs no network and no system Python.
+  const bundled = getBundledPython();
+  if (bundled) {
+    try {
+      const probe = spawnSync(
+        bundled,
+        ["-c", "import fastapi, uvicorn, aiosqlite"],
+        { timeout: 15_000 },
+      );
+      if (probe.status === 0) {
+        log("Bundled Python has backend deps — skipping venv (self-contained).");
+        return true;
+      }
+    } catch {
+      // fall through to the venv bootstrap below
+    }
+  }
+
   const venvDir =
     process.platform === "win32"
       ? path.join(backendDir, "venv", "Scripts")

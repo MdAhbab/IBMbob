@@ -1,5 +1,5 @@
 import { motion, AnimatePresence } from "motion/react";
-import { Terminal, Github, Menu, X } from "lucide-react";
+import { Terminal, Menu, X } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router";
 
@@ -42,15 +42,6 @@ export function Navbar() {
               <Terminal className="w-4 h-4" />
               <span>View Demo</span>
             </Link>
-            <a
-              href="https://github.com/MdAhbab/IBMbob"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 text-base text-neutral-300 hover:text-white rounded-lg hover:bg-white/5 transition-colors"
-            >
-              <Github className="w-4 h-4" />
-              <span>Star</span>
-            </a>
             <a
               href="#download"
               className="hidden sm:inline-flex px-4 py-1.5 text-base rounded-lg bg-white text-black hover:bg-neutral-200 transition-colors shadow-lg shadow-white/10"
@@ -115,16 +106,6 @@ export function Navbar() {
                   Live Demo
                 </Link>
                 <div className="h-px bg-white/10 my-2" />
-                <a
-                  href="https://github.com/MdAhbab/IBMbob"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  onClick={() => setMobileMenuOpen(false)}
-                  className="flex items-center gap-2 px-4 py-3 text-base text-neutral-300 hover:text-white hover:bg-white/5 rounded-lg transition-colors"
-                >
-                  <Github className="w-4 h-4" />
-                  <span>Star on GitHub</span>
-                </a>
                 <a
                   href="https://drive.google.com/drive/folders/1AJTGFYTia7V6eyrli1h_DwC00YGs0w5D?usp=sharing"
                   target="_blank"
