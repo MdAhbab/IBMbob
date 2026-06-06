@@ -106,9 +106,9 @@ npm run build    # outputs to dist/  (CNAME is copied automatically from public/
 3. DNS: `orchestrator` as a **CNAME → <your-user>.github.io**. GitHub Pages reads `CNAME` and binds the
    domain + provisions HTTPS.
 
-> Download links live in `src/app/components/DownloadCTA.tsx` (`DRIVE_DOWNLOAD`). They currently point
-> to the Google Drive folder of installers — upload new `.dmg`/`.exe` builds there (or swap to per-OS
-> direct links via `https://drive.google.com/uc?export=download&id=<FILE_ID>`), rebuild, redeploy.
+> Download links live in `src/app/components/DownloadCTA.tsx`. They point to the `v0.9.1` GitHub
+> Release assets, so publish/replace the matching `.exe` and `.dmg` files on that release, then
+> rebuild/redeploy only when the page UI or version changes.
 
 ---
 

@@ -107,9 +107,7 @@ export function Navbar() {
                 </Link>
                 <div className="h-px bg-white/10 my-2" />
                 <a
-                  href="https://drive.google.com/drive/folders/1AJTGFYTia7V6eyrli1h_DwC00YGs0w5D?usp=sharing"
-                  target="_blank"
-                  rel="noopener noreferrer"
+                  href="#download"
                   onClick={() => setMobileMenuOpen(false)}
                   className="flex items-center justify-center px-4 py-3 text-base rounded-lg bg-white text-black hover:bg-neutral-200 transition-colors shadow-lg"
                 >
