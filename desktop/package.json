@@ -73,6 +73,13 @@
         ]
       },
       {
+        "from": "../packaging/bootstrapper",
+        "to": "packaging/bootstrapper",
+        "filter": [
+          "cli_registry.json"
+        ]
+      },
+      {
         "from": "../shared",
         "to": "shared",
         "filter": [

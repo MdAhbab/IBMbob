@@ -4,6 +4,7 @@ Handles CLI process execution, monitoring, and approval.
 """
 
 from typing import List, Optional
+import asyncio
 from fastapi import APIRouter, Depends, HTTPException, status
 from datetime import datetime, timezone
 from pydantic import BaseModel
@@ -301,15 +302,29 @@ async def spawn_runtime(
         raise HTTPException(500, "Failed to allocate runtime id")
 
     try:
-        session = pty_manager.create(
-            runtime_id=int(runtime_id),
-            provider_id=spawn.provider_id,
-            provider_name=provider_name or "Terminal",
-            cwd=cwd,
-            user_id=user_id,
+        session = await asyncio.wait_for(
+            asyncio.to_thread(
+                pty_manager.create,
+                runtime_id=int(runtime_id),
+                provider_id=spawn.provider_id,
+                provider_name=provider_name or "Terminal",
+                cwd=cwd,
+                user_id=user_id,
+            ),
+            timeout=10.0,
         )
         if spawn.cols and spawn.rows:
             session.resize(spawn.cols, spawn.rows)
+    except asyncio.TimeoutError as e:
+        await db.execute(
+            "UPDATE cli_runtimes SET status='failed', completed_at=? WHERE id=?",
+            (utc_now().isoformat(), runtime_id),
+        )
+        await db.commit()
+        raise HTTPException(
+            500,
+            "Failed to spawn PTY: Windows terminal backend timed out",
+        ) from e
     except Exception as e:
         await db.execute(
             "UPDATE cli_runtimes SET status='failed', completed_at=? WHERE id=?",

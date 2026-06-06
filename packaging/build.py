@@ -1,5 +1,5 @@
 """
-Main build orchestration script for AI CLI Orchestrator v0.8.0
+Main build orchestration script for AI CLI Orchestrator.
 Builds installers for all platforms using electron-builder.
 No PyInstaller required — Python source is bundled via extraResources.
 """
@@ -47,7 +47,7 @@ class InstallerBuilder:
 
     def setup_backend_venv(self):
         """Create / refresh backend venv and install requirements."""
-        print("\n[1/3] Setting up Python backend venv")
+        print("\n[1/4] Setting up Python backend venv")
         print("-" * 70)
         script = self.root_dir / "backend" / "build_backend.py"
         if not script.exists():
@@ -67,7 +67,7 @@ class InstallerBuilder:
 
     def build_frontend(self):
         """Build the Vite frontend."""
-        print("\n[2/3] Building frontend")
+        print("\n[2/4] Building frontend")
         print("-" * 70)
         try:
             subprocess.run(
@@ -82,9 +82,54 @@ class InstallerBuilder:
             print(f"  ERROR frontend build failed (exit {e.returncode})")
             return False
 
+    def install_bundled_python_deps(self):
+        """Install backend requirements into the bundled Python runtime, if present."""
+        bundled_python = self.desktop_dir / "resources" / "python" / (
+            "python.exe" if self.current_platform == "windows" else "bin/python3"
+        )
+        requirements = self.backend_dir / "requirements.txt"
+
+        if not bundled_python.exists():
+            print("\n[3/4] Bundled Python deps")
+            print("-" * 70)
+            print("  SKIP no bundled Python runtime found")
+            return True
+
+        print("\n[3/4] Installing backend deps into bundled Python")
+        print("-" * 70)
+        try:
+            subprocess.run(
+                [
+                    str(bundled_python),
+                    "-m",
+                    "pip",
+                    "install",
+                    "--upgrade",
+                    "--no-warn-script-location",
+                    "-r",
+                    str(requirements),
+                ],
+                cwd=str(self.project_root),
+                check=True,
+            )
+            subprocess.run(
+                [
+                    str(bundled_python),
+                    "-c",
+                    "import fastapi, uvicorn, aiosqlite, cryptography; print('bundled deps OK')",
+                ],
+                cwd=str(self.project_root),
+                check=True,
+            )
+            print("  OK  bundled Python is self-contained")
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f"  ERROR bundled Python dependency setup failed (exit {e.returncode})")
+            return False
+
     def build_desktop(self):
         """Build the Electron desktop app with electron-builder."""
-        print("\n[3/3] Building desktop installer")
+        print("\n[4/4] Building desktop installer")
         print("-" * 70)
         env = os.environ.copy()
         if self.current_platform == 'windows':
@@ -155,15 +200,16 @@ class InstallerBuilder:
         )
         return any(win_config.get(key) or signtool.get(key) for key in signing_keys)
 
-    def print_summary(self, venv_ok, frontend_ok, desktop_ok):
+    def print_summary(self, venv_ok, frontend_ok, bundled_python_ok, desktop_ok):
         print("\n" + "=" * 70)
         print("Build Summary")
         print("=" * 70)
         print(f"  Backend venv:      {'OK' if venv_ok else 'FAILED'}")
         print(f"  Frontend build:    {'OK' if frontend_ok else 'FAILED'}")
+        print(f"  Bundled Python:    {'OK' if bundled_python_ok else 'FAILED'}")
         print(f"  Desktop installer: {'OK' if desktop_ok else 'FAILED'}")
 
-        success = venv_ok and frontend_ok and desktop_ok
+        success = venv_ok and frontend_ok and bundled_python_ok and desktop_ok
         if success:
             print("\nBuild completed successfully!")
             # List artifacts
@@ -189,8 +235,12 @@ class InstallerBuilder:
             print("\nERROR Cannot continue without backend venv.")
             return 1
         frontend_ok = self.build_frontend()
+        bundled_python_ok = self.install_bundled_python_deps()
+        if not bundled_python_ok:
+            print("\nERROR Cannot continue with broken bundled Python runtime.")
+            return 1
         desktop_ok = self.build_desktop()
-        return self.print_summary(venv_ok, frontend_ok, desktop_ok)
+        return self.print_summary(venv_ok, frontend_ok, bundled_python_ok, desktop_ok)
 
 
 def main():

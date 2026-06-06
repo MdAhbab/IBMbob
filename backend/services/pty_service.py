@@ -281,8 +281,11 @@ class PtySession:
         try:
             self._pty = _NativePTY(self.cols, self.rows)
             if sys.platform == "win32":
-                # pywinpty expects env as a list of "KEY=VALUE" strings
-                win_env = [f"{k}={v}" for k, v in aug_env.items()]
+                # pywinpty's low-level PTY API expects a Windows environment
+                # block string: "KEY=VALUE\0KEY2=VALUE2\0".
+                win_env = "\0".join(
+                    f"{k}={v}" for k, v in aug_env.items() if "\0" not in k and "\0" not in v
+                ) + "\0"
                 ok = self._pty.spawn(appname, cmdline=cmdline_args, cwd=self.cwd, env=win_env)
             else:
                 ok = self._pty.spawn(appname, cmdline=cmdline_args, cwd=self.cwd, env=aug_env)
@@ -542,14 +545,22 @@ class PtyManager:
                 if user_id is not None:
                     existing.user_id = user_id
                 return existing
-            session = PtySession(
-                runtime_id=runtime_id,
-                provider_id=provider_id,
-                provider_name=provider_name,
-                cwd=cwd,
-            )
-            session.user_id = user_id
-            session.start(self.loop)
+        session = PtySession(
+            runtime_id=runtime_id,
+            provider_id=provider_id,
+            provider_name=provider_name,
+            cwd=cwd,
+        )
+        session.user_id = user_id
+        session.start(self.loop)
+
+        with self._lock:
+            existing = self._sessions.get(runtime_id)
+            if existing is not None:
+                session.kill()
+                if user_id is not None:
+                    existing.user_id = user_id
+                return existing
             self._sessions[runtime_id] = session
             return session
 

@@ -1,6 +1,6 @@
 {
   "claude-code": {
-    "run":    "claude -p {prompt} --output-format stream-json",
+    "run":    "claude -p {prompt} --output-format stream-json --verbose",
     "model":  "--model {model}",
     "auto":   "--permission-mode acceptEdits",
     "yolo":   "--dangerously-skip-permissions",
