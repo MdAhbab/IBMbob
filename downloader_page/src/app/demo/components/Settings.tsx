@@ -678,7 +678,7 @@ function AboutPanel() {
               Orchestrator
             </div>
             <div className="font-mono text-[13px] uppercase tracking-[0.22em] text-zinc-500">
-              v1.0.0-beta · commit 9c8b3a2
+              v0.9.1-beta · commit 9c8b3a2
             </div>
           </div>
         </div>

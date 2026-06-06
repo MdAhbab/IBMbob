@@ -43,7 +43,7 @@ export function Hero() {
           <span className="absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75 animate-ping" />
           <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-400" />
         </span>
-        <span>v1.0 — Now in public beta</span>
+        <span>v0.9.1 — Now in public beta</span>
         <ArrowRight className="w-3 h-3 text-neutral-500" />
       </motion.div>
 
